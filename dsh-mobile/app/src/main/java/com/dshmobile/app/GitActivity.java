@@ -24,7 +24,7 @@ public final class GitActivity extends Activity {
         super.onCreate(state);
         LinearLayout box=new LinearLayout(this);box.setOrientation(1);box.setPadding(24,48,24,24);
         box.addView(Ui.title(this,"Local workspace Git"));
-        box.addView(Ui.hint(this,"No clone/fetch/push, credentials, hooks, signing or external diff. Custom clean/smudge filters block mutations. No automatic commit or merge."));
+        box.addView(Ui.hint(this,"No clone/fetch/push, credentials, hooks, signing or external diff. Custom clean/smudge filters block all operations. No automatic commit or merge."));
         workspace=field(box,"Runtime path, e.g. /home/dsh/project");workspace.setText("/home/dsh/project");
         path=field(box,"One relative file path (literal, no patterns)");
         LinearLayout row=new LinearLayout(this);box.addView(row);
@@ -43,7 +43,10 @@ public final class GitActivity extends Activity {
     private EditText field(LinearLayout box,String hint){EditText field=new EditText(this);field.setSingleLine(true);field.setHint(hint);box.addView(field);return field;}
     private void button(LinearLayout box,String label,Runnable action){Button b=Ui.outlineButton(this,label);b.setOnClickListener(v->{if(!busy)action.run();});box.addView(b);}
     private String repo(){return GitCommands.workspace(workspace.getText().toString().trim());}
-    private void readAction(List<String> args){try{String repo=repo();perform(()->checked(repo,args));}catch(IllegalArgumentException e){output.setText(e.getMessage());}}
+    private void readAction(List<String> args){try{String repo=repo();perform(()->{
+        // Even status/diff can run a clean filter while comparing worktree content.
+        filterGuard(repo);return checked(repo,args);
+    });}catch(IllegalArgumentException e){output.setText(e.getMessage());}}
     private void perform(Work action){
         if(busy)return;busy=true;cancelRequested=false;output.setText("Running local Git (30 second command timeout)...");
         worker.execute(()->{String text;try{text=action.run();}catch(Exception e){text="Git operation failed: "+e.getMessage();}String result=text;runOnUiThread(()->{busy=false;if(!isFinishing())output.setText(result);});});
@@ -74,8 +77,8 @@ public final class GitActivity extends Activity {
     }
     private void filterGuard(String repo)throws Exception{
         Result filters=execute(repo,Arrays.asList("config","--local","--includes","--get-regexp","^filter\\."));
-        if(filters.code==0)throw new IOException("Repository defines custom clean/smudge filters. Mutations are disabled; inspect configuration manually.");
-        if(filters.code!=1)throw new IOException("Cannot inspect repository filter configuration; mutation refused.");
+        if(filters.code==0)throw new IOException("Repository defines custom clean/smudge filters. Git operations are disabled; inspect configuration manually.");
+        if(filters.code!=1)throw new IOException("Cannot inspect repository filter configuration; operation refused.");
     }
     private void mutate(String question,List<String> prefix){
         try{

@@ -30,22 +30,38 @@ class DocumentationTests(unittest.TestCase):
         (build / "changelog.gz").write_bytes(b"optional")
         return runtime, build
 
-    def test_license_materialized_before_purge_and_optional_docs_recorded(self):
+    def test_license_and_arbitrary_doc_file_links_materialized_before_purge(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runtime, build = self.prepare(root)
             self.link(runtime / "copyright", "../build-dev/copyright")
-            for name in ["changelog.gz", "NEWS.gz", "README.Debian"]:
+            names = ["changelog.gz", "Changes.gz", "NEWS.gz", "README.Debian", "unclassified.gz"]
+            for name in names:
                 self.link(runtime / name, "../build-dev/changelog.gz")
             docs.preserve(root)
             self.assertFalse((runtime / "copyright").is_symlink())
+            self.assertTrue(all(not (runtime / name).is_symlink() for name in names))
             shutil.rmtree(build)
             report = docs.cleanup(root)
             self.assertEqual((runtime / "copyright").read_text(), "license must survive")
             self.assertEqual(report["restoredLicenseFiles"], 1)
-            self.assertEqual(len(report["removedOptionalLinks"]), 3)
-            self.assertFalse((runtime / "changelog.gz").exists())
+            self.assertEqual(len(report["removedOptionalLinks"]), 0)
+            self.assertTrue(all((runtime / name).read_bytes() == b"optional" for name in names))
+            self.assertEqual(len(report["materializedFileLinksBeforePurge"]), 6)
             self.assertTrue((root / docs.LICENSES / "ubuntu-docs/runtime/copyright").is_file())
+
+    def test_changes_is_an_explicit_optional_cleanup_name(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime, build = self.prepare(root)
+            (runtime / "copyright").write_text("license")
+            docs.preserve(root)
+            self.link(runtime / "Changes.gz", "../build-dev/changelog.gz")
+            shutil.rmtree(build)
+            report = docs.cleanup(root)
+            self.assertEqual(len(report["removedOptionalLinks"]), 1)
+            self.assertEqual(report["removedOptionalLinks"][0]["path"], "usr/share/doc/runtime/Changes.gz")
+            self.assertFalse((runtime / "Changes.gz").exists())
 
     def test_purged_doc_directory_alias_license_is_restored(self):
         with tempfile.TemporaryDirectory() as temporary:

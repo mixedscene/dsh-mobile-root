@@ -15,7 +15,7 @@ spec.loader.exec_module(packer)
 DOC = "usr/share/doc"
 LICENSES = "opt/dsh-mobile/licenses"
 PROTECTED = re.compile(r"^(copyright|licen[cs]e|copying|notice)(?:$|[._-])", re.I)
-OPTIONAL = re.compile(r"^(changelog|news|readme)(?:$|[._-])", re.I)
+OPTIONAL = re.compile(r"^(changelog|changes|news|readme)(?:$|[._-])", re.I)
 
 
 def walk(root, logical=DOC, ancestors=frozenset()):
@@ -36,22 +36,32 @@ def walk(root, logical=DOC, ancestors=frozenset()):
         yield logical, path
 
 
-def write_regular(parent, name, content):
+def write_regular(parent, name, content, mode=0o644):
     """Atomically replace the leaf itself, never follow a destination symlink."""
     with tempfile.NamedTemporaryFile(dir=parent, prefix=".license-", delete=False) as stream:
         temporary = Path(stream.name)
         stream.write(content)
-    os.chmod(temporary, 0o644)
+    os.chmod(temporary, mode & 0o777)
     os.replace(temporary, parent / name)
 
 
 def preserve(root):
-    """Snapshot and materialize all license-shaped files while build targets still exist."""
+    """Snapshot licenses and materialize every valid document file link before purge."""
     root = root.resolve(strict=True)
     destination = root / LICENSES / "ubuntu-docs"
     destination.mkdir(parents=True, exist_ok=True)
     records = []
+    materialized = []
     for logical, resolved in walk(root):
+        if resolved is not None and resolved.is_file():
+            parent = packer.resolve_confined(root, str(PurePosixPath(logical).parent))
+            leaf = parent / PurePosixPath(logical).name
+            if leaf.is_symlink():
+                content = resolved.read_bytes()
+                target = os.readlink(leaf)
+                write_regular(parent, leaf.name, content, stat.S_IMODE(resolved.stat().st_mode))
+                materialized.append({"path": logical, "target": target, "sha256": hashlib.sha256(content).hexdigest()})
+                resolved = leaf
         if not PROTECTED.match(PurePosixPath(logical).name):
             continue
         if resolved is None or not resolved.is_file():
@@ -68,6 +78,7 @@ def preserve(root):
             write_regular(parent, leaf.name, content)
         records.append({"path": logical, "snapshot": str(PurePosixPath(LICENSES) / "ubuntu-docs" / relative), "sha256": hashlib.sha256(content).hexdigest()})
     (root / LICENSES / "ubuntu-doc-preservation.json").write_text(json.dumps(records, indent=2) + "\n")
+    (root / LICENSES / "ubuntu-doc-file-materialization.json").write_text(json.dumps(materialized, indent=2) + "\n")
 
 
 def license_parent(root, logical, restorations):
@@ -121,7 +132,8 @@ def cleanup(root):
             raise ValueError(f"unclassified missing documentation link (not removed): {logical}")
         removed.append({"path": logical, "target": os.readlink(leaf), "reason": "optional documentation target removed by build-package purge"})
         leaf.unlink()
-    report = {"scope": "/usr/share/doc", "restoredLicenseFiles": restored, "restoredLicenseDirectories": restorations, "removedOptionalLinks": removed}
+    materialized = json.loads((root / LICENSES / "ubuntu-doc-file-materialization.json").read_text())
+    report = {"scope": "/usr/share/doc", "materializedFileLinksBeforePurge": materialized, "restoredLicenseFiles": restored, "restoredLicenseDirectories": restorations, "removedOptionalLinks": removed}
     (root / LICENSES / "dangling-optional-docs.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
 

@@ -1,6 +1,6 @@
 # DSH Root (experimental Android fork)
 
-DSH Root is a root-only Android shell for the Harness Web interface. It has a separate application ID (`io.github.mixedscene.dshroot`), target SDK 36, and no compatibility with the old proot installer or its private data. Install it alongside the original application and export ordinary sessions/files from the old application yourself. Do not copy credential databases or old signing keys.
+DSH Root is a root-only Android shell for the Harness Web interface. It has a separate application ID (`io.github.mixedscene.dshroot`, with `.debug` appended for the testing APK), target SDK 36, and no compatibility with the old proot installer or its private data. Install it alongside the original application and export ordinary sessions/files from the old application yourself. Do not copy credential databases or old signing keys.
 
 ## Current behavior
 
@@ -17,7 +17,7 @@ DSH Root is a root-only Android shell for the Harness Web interface. It has a se
 
 Authoritative Node/Agent/tool activity reporting is not yet connected. The service therefore reports activity as unknown and **never automatically freezes** the runtime. It holds no wake lock; OEM background completion is not guaranteed. Signal-group freeze functions in the supervisor are weaker than a dedicated cgroup freezer and are not represented as completed idle freezing.
 
-The Git screen supports local status/branch, working/staged diff, one-file stage/unstage and an explicit reviewed commit using argv. It disables hooks, external diffs, signing, prompts, automatic maintenance and lazy fetch; global/system Git credentials are not loaded. Mutations refuse repositories with custom clean/smudge filters. No clone/fetch/push, automatic merge or worktree management is provided.
+The Git screen supports local status/branch, working/staged diff, one-file stage/unstage and an explicit reviewed commit using argv. It disables hooks, external diffs, signing, prompts, automatic maintenance and lazy fetch; global/system Git credentials are not loaded. Every operation refuses repositories with custom clean/smudge filters: even status/diff can invoke a clean filter when comparing worktree contents. No clone/fetch/push, automatic merge or worktree management is provided.
 
 Directory moves, cross-filesystem moves, recursive deletion, large/binary preview, safe host-root approval UI, native Antigravity broker/multiple accounts, mobile resource limits and full selected feature matrix remain incomplete. Build success is not a claim that these features work. Android 16, Android 17, 4KB/16KB, KernelSU and real API tests have not been completed on a phone.
 
@@ -27,7 +27,7 @@ The GitHub Actions workflow builds the runtime and ARM64 supervisor and copies i
 
 Cloud signing reads `DSH_KEYSTORE_PATH`, `DSH_KEYSTORE_PASSWORD`, `DSH_KEY_ALIAS` and `DSH_KEY_PASSWORD` from the build environment. Without them, release output is unsigned. A CI-generated test key must not be described as a permanent user release key, and reinstall/upgrade requires the same key or explicit data export and uninstall. The repository's old public keystore is never used.
 
-Cloud checks include `:app:testReleaseUnitTest`, `:app:lintRelease` and `:app:assembleRelease` as selected by the workflow. `WebOriginTest` rejects external origins, userinfo, alternate loopback names and ports. `GitCommandsTest` checks argv handling and path rejection. Linux Node tests run `node --test dsh-mobile/tools/workspace-ops.test.mjs` for workspace pagination, stale writes, links/traversal, no-overwrite transfers and an ancestor-directory replacement race. These `/proc/self/fd` tests deliberately skip on non-Linux hosts. Installer tests cover archive policy separately. No Android environment or dependency downloads are needed on the local computer.
+The testing workflow runs `:app:testDebugUnitTest` and `:app:assembleDebug`, not release lint or device instrumentation. `WebOriginTest` rejects external origins, userinfo, alternate loopback names and ports. `GitCommandsTest` checks argv handling and path rejection. Linux Node tests run `node --test dsh-mobile/tools/workspace-ops.test.mjs` for workspace pagination, stale writes, links/traversal, no-overwrite transfers and an ancestor-directory replacement race. These `/proc/self/fd` tests deliberately skip on non-Linux hosts. Installer tests cover archive policy separately. No Android environment or dependency downloads are needed on the local computer.
 
 ## Device smoke (user performed)
 
