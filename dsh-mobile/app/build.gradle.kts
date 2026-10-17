@@ -5,45 +5,31 @@ plugins {
 android {
     namespace = "com.dshmobile.app"
     compileSdk = 36
-
     defaultConfig {
-        applicationId = "com.dshmobile.app"
+        applicationId = "io.github.mixedscene.dshroot"
         minSdk = 26
-        // targetSdk 必须 ≤28：Android 10+ 对 targetSdk 29+ 的应用启用 SELinux 域
-        // 限制，禁止 exec 私有目录里的二进制（proot/node 都跑不了），Termux 同理。
-        // 这是硬性冲突，因此 Android 16（API 36）适配走另一条路：
-        // targetSdk 保持 28（Android 16 仍可正常安装运行），权限全部显式申请
-        // （POST_NOTIFICATIONS / MANAGE_EXTERNAL_STORAGE / 前台服务声明），
-        // 16KB 页设备在安装期由 BootstrapInstaller 检测并告警。
-        targetSdk = 28
-        versionCode = 41
-        versionName = "1.0.40"
-    }
-
-    lint {
-        abortOnError = false
-        disable += setOf("ExpiredTargetSdkVersion", "OldTargetApi")
-    }
-
-    signingConfigs {
-        create("release") {
-            storeFile = file("../dsh-mobile.keystore")
-            storePassword = "dshmobile2026"
-            keyAlias = "dshmobile"
-            keyPassword = "dshmobile2026"
+        targetSdk = 36
+        versionCode = 42
+        versionName = "0.1.0-root-preview"
+        ndk { abiFilters += "arm64-v8a" }
+}
+    val signingPath = System.getenv("DSH_KEYSTORE_PATH")
+    if (!signingPath.isNullOrBlank()) {
+        signingConfigs.create("cloud") {
+            storeFile = file(signingPath)
+            storePassword = System.getenv("DSH_KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("DSH_KEY_ALIAS")
+            keyPassword = System.getenv("DSH_KEY_PASSWORD")
         }
     }
-
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            if (!signingPath.isNullOrBlank()) signingConfig = signingConfigs.getByName("cloud")
         }
-        debug {
-            applicationIdSuffix = ".debug"
-        }
+        debug { applicationIdSuffix = ".debug" }
     }
-
+    packaging { jniLibs { useLegacyPackaging = true } }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -51,6 +37,7 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation("org.apache.commons:commons-compress:1.27.1")
     implementation("org.tukaani:xz:1.10")
 }

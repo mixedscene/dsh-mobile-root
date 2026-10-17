@@ -1,331 +1,50 @@
 package com.dshmobile.app;
 
-import android.app.Activity;
-import android.app.AlertDialog;
-import android.content.ClipData;
-import android.content.Intent;
-import android.database.Cursor;
+import android.app.*;
+import android.content.*;
 import android.net.Uri;
-import android.os.Bundle;
-import android.provider.OpenableColumns;
-import android.view.Gravity;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.ArrayAdapter;
-import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.ListView;
-import android.widget.TextView;
-import android.widget.Toast;
+import android.os.*;
+import android.widget.*;
+import java.io.*;
+import java.util.*;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.file.Files;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.List;
-
-/**
- * 容器文件管理器：rootfs 就是 app 私有目录下的真实文件树，Java 侧直接读写。
- * 路径以容器内视角显示（/ = rootfs 根）；默认从 /home/dsh（dsh 工作目录）开始。
- * 导入走 SAF（免权限），导出复制到 /sdcard/dsh-shared（即容器 /mnt/shared）。
- */
-public class FileManagerActivity extends Activity {
-
-    private static final int REQ_IMPORT = 41;
-
-    private File rootfs;
-    private File current;
-    private TextView pathView;
-    private ArrayAdapter<String> adapter;
-    /** 与 adapter 行一一对应；row 0 可能是「..」返回行（对应 null）。 */
-    private final List<File> rows = new ArrayList<>();
-
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        rootfs = ProotRunner.rootfsDir(this);
-        if (!rootfs.isDirectory()) {
-            Toast.makeText(this, "容器尚未安装，请先完成初始化", Toast.LENGTH_LONG).show();
-            finish();
-            return;
-        }
-        File home = ProotRunner.homeDir(this);
-        current = home.isDirectory() ? home : rootfs;
-        buildUi();
-        refresh();
+/** SAF transfers to a private exchange directory. Workspace editing remains in Harness Web UI. */
+public final class FileManagerActivity extends Activity {
+    private File selected;
+    private LinearLayout list;
+    @Override public void onCreate(Bundle state) {
+        super.onCreate(state);
+        LinearLayout box = new LinearLayout(this); box.setOrientation(1); box.setPadding(24,48,24,24);
+        box.addView(Ui.title(this,"Private file exchange"));
+        box.addView(Ui.body(this,"Import/export attachments here. This is not a root filesystem browser. Workspace files, Git and terminal are managed by the Harness interface."));
+        Button add = Ui.primaryButton(this,"Import file (maximum 32 MiB)"); add.setOnClickListener(v -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"),1)); box.addView(add);
+        ScrollView scroll = new ScrollView(this); list = new LinearLayout(this); list.setOrientation(1); scroll.addView(list); box.addView(scroll); Ui.content(this,box); refresh();
     }
-
-    private void buildUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Ui.bgSoft(this));
-
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.VERTICAL);
-        int bp = Ui.dp(this, 12);
-        bar.setPadding(bp, Ui.dp(this, 10), bp, Ui.dp(this, 4));
-        bar.setBackgroundColor(Ui.bg(this));
-        TextView title = Ui.title(this, "文件管理器");
-        title.setTextSize(18);
-        bar.addView(title);
-        pathView = Ui.hint(this, "");
-        pathView.setSingleLine(true);
-        pathView.setEllipsize(android.text.TextUtils.TruncateAt.START);
-        bar.addView(pathView);
-        root.addView(bar);
-
-        adapter = new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1) {
-            @Override
-            public View getView(int position, View convertView, ViewGroup parent) {
-                View v = super.getView(position, convertView, parent);
-                TextView tv = v.findViewById(android.R.id.text1);
-                tv.setTextColor(Ui.text(v.getContext()));
-                tv.setTextSize(15);
-                tv.setPadding(Ui.dp(FileManagerActivity.this, 16),
-                        Ui.dp(FileManagerActivity.this, 12),
-                        Ui.dp(FileManagerActivity.this, 16),
-                        Ui.dp(FileManagerActivity.this, 12));
-                return v;
-            }
-        };
-        ListView listView = new ListView(this);
-        listView.setBackgroundColor(Ui.bg(this));
-        listView.setDivider(null);
-        listView.setAdapter(adapter);
-        listView.setOnItemClickListener((p, v, pos, id) -> onTap(pos));
-        listView.setOnItemLongClickListener((p, v, pos, id) -> onLongTap(pos));
-        root.addView(listView, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
-
-        // 底栏
-        LinearLayout bottom = new LinearLayout(this);
-        bottom.setOrientation(LinearLayout.VERTICAL);
-        bottom.setBackgroundColor(Ui.bg(this));
-        bottom.setPadding(bp, bp, bp, bp);
-        LinearLayout btnRow = new LinearLayout(this);
-        btnRow.setOrientation(LinearLayout.HORIZONTAL);
-        android.widget.Button importBtn = Ui.primaryButton(this, "导入到当前目录");
-        importBtn.setOnClickListener(v -> pickImport());
-        btnRow.addView(importBtn, new LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1));
-        android.widget.Button mkdirBtn = Ui.outlineButton(this, "新建文件夹");
-        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1);
-        mlp.leftMargin = Ui.dp(this, 12);
-        mkdirBtn.setLayoutParams(mlp);
-        mkdirBtn.setOnClickListener(v -> mkdirDialog());
-        btnRow.addView(mkdirBtn);
-        bottom.addView(btnRow);
-        TextView hint = Ui.hint(this, "点文件：导出到 /mnt/shared（/sdcard/dsh-shared）；长按：删除");
-        hint.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams hlp = Ui.matchWrap();
-        hlp.topMargin = Ui.dp(this, 8);
-        bottom.addView(hint, hlp);
-        root.addView(bottom);
-
-        setContentView(root);
+    static File directory(Context context) throws IOException {
+        File dir = new File(context.getFilesDir(),"exchange"); if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create exchange"); return dir;
     }
-
-    /** 容器视角路径（/ = rootfs）。 */
-    private String containerPath(File f) {
-        String r = rootfs.getAbsolutePath();
-        String p = f.getAbsolutePath();
-        if (p.equals(r)) return "/";
-        return p.startsWith(r + "/") ? p.substring(r.length()) : p;
-    }
-
     private void refresh() {
-        pathView.setText(containerPath(current));
-        rows.clear();
-        adapter.clear();
-        if (!current.equals(rootfs)) {
-            rows.add(null);
-            adapter.add("..  （返回上级）");
-        }
-        File[] kids = current.listFiles();
-        if (kids != null) {
-            Arrays.sort(kids, Comparator
-                    .comparing(File::isFile) // 目录在前
-                    .thenComparing(f -> f.getName().toLowerCase()));
-            for (File f : kids) {
-                rows.add(f);
-                adapter.add(f.isDirectory()
-                        ? "\uD83D\uDCC1 " + f.getName() + "/"
-                        : "\uD83D\uDCC4 " + f.getName() + "    " + sizeText(f.length()));
-            }
-        }
-        adapter.notifyDataSetChanged();
-    }
-
-    private static String sizeText(long n) {
-        if (n < 1024) return n + " B";
-        if (n < 1024 * 1024) return (n / 1024) + " KB";
-        if (n < 1024L * 1024 * 1024) return String.format("%.1f MB", n / 1048576.0);
-        return String.format("%.2f GB", n / 1073741824.0);
-    }
-
-    private void onTap(int pos) {
-        File f = rows.get(pos);
-        if (f == null) { // ".."
-            current = current.getParentFile();
-            refresh();
-            return;
-        }
-        if (f.isDirectory()) {
-            current = f;
-            refresh();
-            return;
-        }
-        new AlertDialog.Builder(this)
-                .setTitle(f.getName())
-                .setItems(new String[]{"导出到 /mnt/shared", "删除"}, (d, which) -> {
-                    if (which == 0) exportFile(f);
-                    else confirmDelete(f);
-                })
-                .show();
-    }
-
-    private boolean onLongTap(int pos) {
-        File f = rows.get(pos);
-        if (f != null) confirmDelete(f);
-        return true;
-    }
-
-    private void confirmDelete(File f) {
-        new AlertDialog.Builder(this)
-                .setTitle("删除")
-                .setMessage("确定删除 " + containerPath(f)
-                        + (f.isDirectory() ? "（含全部内容）" : "") + " ？")
-                .setPositiveButton("删除", (d, w) -> {
-                    BootstrapInstaller.deleteRecursively(f);
-                    refresh();
-                })
-                .setNegativeButton("取消", null)
-                .show();
-    }
-
-    /** 导出：复制到 /sdcard/dsh-shared（容器内即 /mnt/shared）。 */
-    private void exportFile(File f) {
-        File destDir = ProotRunner.sharedDir();
-        File dest = uniqueName(destDir, f.getName());
+        list.removeAllViews();
         try {
-            copyFile(f, dest);
-            Toast.makeText(this, "已导出到 " + dest.getAbsolutePath(), Toast.LENGTH_LONG).show();
-        } catch (IOException e) {
-            Toast.makeText(this, "导出失败：" + e.getMessage()
-                    + "\n可到设置开启「所有文件访问权限」后重试", Toast.LENGTH_LONG).show();
-        }
+            File[] files = directory(this).listFiles(); if (files==null) return;
+            Arrays.sort(files,Comparator.comparing(File::getName));
+            for (File f: files) { Button b = Ui.outlineButton(this,f.getName()+" ("+f.length()+" bytes)"); b.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle(f.getName()).setItems(new String[]{"Export with SAF","Delete"},(dialog,n) -> { if(n==0){ selected=f; startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/octet-stream").putExtra(Intent.EXTRA_TITLE,f.getName()),2); } else { new AlertDialog.Builder(this).setMessage("Delete this private copy?").setPositiveButton("Delete",(d,w) -> { if(!f.delete()) Toast.makeText(this,"Delete failed",0).show(); refresh(); }).setNegativeButton("Cancel",null).show(); } }).show()); list.addView(b); }
+        } catch(IOException e) { list.addView(Ui.body(this,"Exchange directory unavailable")); }
     }
-
-    private static File uniqueName(File dir, String name) {
-        File f = new File(dir, name);
-        if (!f.exists()) return f;
-        int dot = name.lastIndexOf('.');
-        String base = dot > 0 ? name.substring(0, dot) : name;
-        String ext = dot > 0 ? name.substring(dot) : "";
-        for (int i = 1; ; i++) {
-            f = new File(dir, base + "(" + i + ")" + ext);
-            if (!f.exists()) return f;
-        }
-    }
-
-    private static void copyFile(File src, File dest) throws IOException {
-        try (InputStream in = Files.newInputStream(src.toPath());
-             OutputStream out = new FileOutputStream(dest)) {
-            byte[] buf = new byte[64 * 1024];
-            int n;
-            while ((n = in.read(buf)) != -1) {
-                out.write(buf, 0, n);
-            }
-        }
-    }
-
-    /** 导入：SAF 选文件（免存储权限），复制进当前目录。 */
-    private void pickImport() {
-        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        i.addCategory(Intent.CATEGORY_OPENABLE);
-        i.setType("*/*");
-        i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-        startActivityForResult(i, REQ_IMPORT);
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQ_IMPORT || resultCode != RESULT_OK || data == null) return;
-        List<Uri> uris = new ArrayList<>();
-        ClipData clip = data.getClipData();
-        if (clip != null) {
-            for (int i = 0; i < clip.getItemCount(); i++) {
-                uris.add(clip.getItemAt(i).getUri());
-            }
-        } else if (data.getData() != null) {
-            uris.add(data.getData());
-        }
-        int ok = 0;
-        int fail = 0;
-        for (Uri u : uris) {
+    @Override protected void onActivityResult(int request,int result,Intent data) {
+        super.onActivityResult(request,result,data); if(result!=RESULT_OK || data==null || data.getData()==null)return;
+        Uri uri=data.getData(); File export=selected;
+        new Thread(() -> {
+            File incoming=null;
             try {
-                importUri(u);
-                ok++;
-            } catch (IOException e) {
-                fail++;
-            }
-        }
-        refresh();
-        Toast.makeText(this, "导入完成：" + ok + " 个" + (fail > 0 ? "，失败 " + fail + " 个" : ""),
-                Toast.LENGTH_SHORT).show();
+                if(request==1) { incoming=new File(directory(this),"import-"+UUID.randomUUID()); try(InputStream in=getContentResolver().openInputStream(uri); OutputStream out=new FileOutputStream(incoming)){ copy(in,out,32L*1024*1024); } }
+                else if(request==2 && export!=null) { try(InputStream in=new FileInputStream(export); OutputStream out=getContentResolver().openOutputStream(uri)){copy(in,out,32L*1024*1024);} }
+                runOnUiThread(this::refresh);
+            } catch(Exception e) { if(incoming!=null) incoming.delete(); runOnUiThread(() -> Toast.makeText(this,"Transfer failed or size limit exceeded",Toast.LENGTH_LONG).show()); }
+        },"saf-transfer").start();
     }
-
-    private void importUri(Uri uri) throws IOException {
-        String name = displayName(uri);
-        File dest = uniqueName(current, name);
-        try (InputStream in = getContentResolver().openInputStream(uri);
-             OutputStream out = new FileOutputStream(dest)) {
-            if (in == null) throw new IOException("无法读取所选文件");
-            byte[] buf = new byte[64 * 1024];
-            int n;
-            while ((n = in.read(buf)) != -1) {
-                out.write(buf, 0, n);
-            }
-        }
-    }
-
-    private String displayName(Uri uri) {
-        String name = null;
-        try (Cursor c = getContentResolver().query(uri, null, null, null, null)) {
-            if (c != null && c.moveToFirst()) {
-                int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-                if (idx >= 0) name = c.getString(idx);
-            }
-        } catch (Exception ignored) {
-        }
-        if (name == null || name.isEmpty()) name = "import-" + System.currentTimeMillis();
-        return name.replace('/', '_');
-    }
-
-    private void mkdirDialog() {
-        EditText et = new EditText(this);
-        et.setHint("文件夹名");
-        et.setSingleLine(true);
-        int p = Ui.dp(this, 16);
-        et.setPadding(p, p / 2, p, p / 2);
-        new AlertDialog.Builder(this)
-                .setTitle("新建文件夹")
-                .setView(et)
-                .setPositiveButton("创建", (d, w) -> {
-                    String name = et.getText().toString().trim().replace("/", "");
-                    if (name.isEmpty()) return;
-                    File f = new File(current, name);
-                    if (f.exists() || !f.mkdirs()) {
-                        Toast.makeText(this, "创建失败（已存在或无权限）", Toast.LENGTH_SHORT).show();
-                    }
-                    refresh();
-                })
-                .setNegativeButton("取消", null)
-                .show();
+    static void copy(InputStream in,OutputStream out,long limit)throws IOException {
+        if(in==null || out==null)throw new IOException("Provider unavailable"); byte[] bytes=new byte[8192]; long total=0; int n;
+        while((n=in.read(bytes))!=-1){total+=n;if(total>limit)throw new IOException("Limit exceeded");out.write(bytes,0,n);}
     }
 }

@@ -1,67 +1,39 @@
-# DSH 手机版（dsh-mobile）
+# DSH Root (experimental Android fork)
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 Android 手机版：App 内置 proot + Ubuntu 22.04 容器，容器内运行 Node.js + `@deepseek-ai/dsh web`，用 WebView 加载其 Web UI 并注入移动端适配样式，界面为 DeepSeek 同款风格。
+DSH Root is a root-only Android shell for the Harness Web interface. It has a separate application ID (`io.github.mixedscene.dshroot`), target SDK 36, and no compatibility with the old proot installer or its private data. Install it alongside the original application and export ordinary sessions/files from the old application yourself. Do not copy credential databases or old signing keys.
 
-## 功能
+## Current behavior
 
-- **内置 Ubuntu 容器**：proot 运行完整 Ubuntu 22.04 (aarch64) rootfs，首启联网下载（约 200MB：rootfs + Node.js + dsh），默认全部走国内镜像（rootfs/Node/Termux/apt 用中科大源，npm 用 npmmirror）
-- **干净工作目录**：dsh 的 HOME 与 cwd 是容器内独立的 `/home/dsh`（不用 /root，避免安装残留与 npm 缓存污染工作区选择器）
-- **SD 卡目录映射**：外置 SD 卡 bind 到容器 `/mnt/sd` 和工作目录内 `/home/dsh/sd`；`/sdcard/dsh-shared` 兜底映射到 `/mnt/shared` 与 `/home/dsh/shared`，打开工作区即可看到 sd/ shared/ 两个入口，方便传入/传出文件
-- **手机版界面**：注入的 `mobile.css` 强制 dsh Web UI 适配手机屏幕比例（弹窗不溢出、右栏/详情面板按内容三态门控——上游收起 `data-rightbar-collapsed` 时保持隐藏、轨迹事件详情面板整宽覆盖、触控目标加大、代码块横向滚动、设置弹窗单列化、消息页高度链锁死内部滚动、token/耗时统计条自动折行完整显示、悬浮提示气泡弹出 2.5 秒后自动消失）。会话页输入座钉成固定浮层，消息流底部按座的实测高度动态留白（`inject.js` 往滚动容器末尾插间隔块，DOM 被 dsh 重建后重新量一次），对话末尾不会被输入框盖住
-- **侧栏非常驻**：左侧 rail 默认隐藏，左上角悬浮按钮或屏幕左缘右滑呼出覆盖式抽屉，点遮罩、抽屉上左滑或选中会话自动收起。开合各有 200ms 过渡：**收起时先把抽屉滑出屏幕、动画结束才真正收起 dsh 侧栏**——顺序反过来会让侧栏内容在仍可见的面板里先重排成图标栏，收起动画看起来是碎的
-- **DeepSeek 风格**：启动屏/安装向导/设置页均为 DeepSeek 品牌风格（品牌蓝 #4D6BFE、圆角卡片）
-- **前台服务保活**：容器由前台服务持有，通知栏可查看状态/停止；Web 服务先启动，SSH 的 openssh 安装/启动在后台线程异步进行（写独立的 `dsh-sshd.log`），不拖慢首次进界面
-- **插件自愈**：dsh 的插件加载失败会拖垮整个 `dsh web`（plugin tree failed to load）。服务检测到 `failed to import loader entry <id> (<pkg>)` 时，会把这个用户插件从 profile 的 `dsh.profile.bundles` 临时摘掉再重启，保证界面能起来；插件文件保留，之后用 `dsh plugin --profile web add <兼容版本>` 重装即会重新入列。设置页的「添加插件」支持绝对路径，可直接装共享目录里的本地 tarball（如 `/home/dsh/shared/dsh-cmdgo-provider-0.4.0.tgz`）
-- **浏览器 token 鉴权**：dsh 0.1.5 起 Web 入口带一次性 token（根路径无 token/无有效 cookie 直接 401）。手机版不用去抓 `dsh web` 的 stdout——会话 cookie 的签名密钥是持久化的，存在容器内 `/home/dsh/.dsh/.credentials.yaml` 的 `client-connection/browser-session` 记录里；App 直接读该密钥、用相同算法（HMAC-SHA256）自签一枚按 `host:port` 绑定的 cookie（127.0.0.1 与 localhost 各一枚）写入 WebView，再加载干净根路径。加载前会先等「带 cookie 的根路径」返回 HTTP 200（最多 120s）才加载，避开容器/插件树装配期；抓不到密钥时回退实时捕获 `dsh web` 的带 token URL 做一次交换。`dsh web` 以 `--no-open` 启动，避免容器内无效的浏览器拉起
-- **容器 SSH**：openssh-server 随服务自启（仅监听 127.0.0.1:8022），本机终端/Termux 直接 `ssh dsh@127.0.0.1 -p 8022`（普通用户 dsh，登录 PATH 带 node/npm；root 同密码也可登），电脑走 `adb forward`；密码首次自动生成，设置页可查看/复制/改端口
-- **命令沙箱已禁用**：容器启动时钉死 `DSH_PERMISSION_MODE=danger-full-access`（proot 里 bwrap/Landlock 基本不可用，workspace-write 会报 SANDBOX_UNAVAILABLE）；dsh 的 bash/文件写入不设围栏、不逐条询问。会话里仍可手动切回 workspace-write/read-only，但沙箱 runner 不可用时受限命令会失败
-- **本仓库补丁包（harness overlay）**：容器里的 `@deepseek-ai/dsh` 是 npm 上的上游发行版，本仓库对 harness 源码的修复不会自己进容器。APK 因此携带 `assets/harness-overlay/`——由 `dsh-mobile/tools/build-harness-overlay.mjs` 从本仓库构建导出，含逐文件 sha256 清单与目标 harness 版本。安装流程按该版本装 dsh（`npm i -g @deepseek-ai/dsh@<版本>`，不再跟着 npm 的 latest 漂），装完由 `HarnessOverlay` 覆盖同名包；服务每次启动前核对内容哈希做自愈（一致则零写入），并在发现容器内 dsh 版本落后时自动对齐到目标版本（联网 npm 装包，每个服务进程只尝试一次）——所以升级 APK 后无需重装容器。覆盖前会核对已装版本，版本不匹配就整包跳过并写 `dsh-web.log`——宁可保留上游行为，也不装出错误组合。当前纳入的补丁：`@deepseek-ai/dsh-fs-local`（createIfAbsent 在无硬链接文件系统上的降级 + 发布后普通文件校验，见 issue #13）
+- Setup requires a user action before `su` probing and installation of the bundled verified runtime. Ordinary launches do not install packages, run npm, or compile native modules on the phone.
+- The native supervisor launches a chroot runtime. SELinux stays Enforcing; root capability, chroot, network access, KernelSU policy and page-size behavior require device verification. The runtime is not a security sandbox for untrusted plugins.
+- Tap **Start** to launch one foreground-service-owned runtime. Exit/failure requires a manual restart. The notification and Settings provide an explicit Stop action. No periodic health check or hidden repair installs run.
+- The WebView accepts exactly `http://127.0.0.1:3080`. It consumes the supported `dsh web` token URL printed by the server, without reading signing secrets or minting cookies. The URL/token are memory-only and excluded from diagnostics. External navigation and browser permission requests are blocked.
+- Settings exports at most 120 lifecycle messages, without runtime output, account tokens, provider keys or user conversation content. Native/Node process output is consumed rather than retained.
+- The private file exchange supports bounded SAF import/export and explicit deletion. It is not a complete root filesystem manager. Harness workspace files remain managed by the Web UI. Imported exchange files are not automatically attached to a conversation.
+- Screenshot captures one user-consented MediaProjection frame, displays a preview, and requires confirmation before SAF export. The image is never automatically uploaded. Attach the exported image manually through the Web file picker. Protected content may be blank.
+- The old pipe/TextView terminal, SSH server, broad storage permissions, injected DOM polling, public release key, self-signed browser cookies and overlay repair chain are removed. This app does not add a native PTY emulator. Only a working upstream Harness Web PTY can satisfy terminal use.
 
-## 使用
+## Important incomplete work
 
-1. 安装 APK，首次启动进入安装向导，等待下载安装完成
-2. 自动进入 Web 界面（127.0.0.1:3080），按引导配置 API key 即可使用
-3. 需要 SD 卡映射：设置 → 开启「所有文件访问权限」→ 选择外置 SD 目录 → 重启服务
-4. 容器内访问宿主机文件：`/mnt/sd`（外置 SD）、`/mnt/shared`（共享存储 dsh-shared）；工作目录 `/home/dsh` 下的 `sd/` 与 `shared/` 是同样两个入口
-5. 划卡清任务后服务被杀是 OEM 行为：到 设置 → 后台保活 里把「忽略电池优化」加入白名单，并按引导开「自启动/允许后台活动」（荣耀/MagicOS 必须），可大幅降低被杀概率
-6. 注意：v1.0.7 起 dsh 的 HOME 从 /root 迁到 /home/dsh，升级后需重新填一次 API key
-7. 升级 APK 不需要重装容器：服务启动时会自动把容器内的 dsh 对齐到 APK 携带的补丁包目标版本（需要联网），并把本仓库的补丁包覆盖上去；进度与结果写在 `dsh-web.log`
+Authoritative Node/Agent/tool activity reporting is not yet connected. The service therefore reports activity as unknown and **never automatically freezes** the runtime. It holds no wake lock; OEM background completion is not guaranteed. Signal-group freeze functions in the supervisor are weaker than a dedicated cgroup freezer and are not represented as completed idle freezing.
 
-## 构建
+The Git screen supports local status/branch, working/staged diff, one-file stage/unstage and an explicit reviewed commit using argv. It disables hooks, external diffs, signing, prompts, automatic maintenance and lazy fetch; global/system Git credentials are not loaded. Mutations refuse repositories with custom clean/smudge filters. No clone/fetch/push, automatic merge or worktree management is provided.
 
-环境：JDK 17+、Android SDK 35、Gradle 9.5+（自带 wrapper）。
+The complete workspace file manager, safe host-root approval UI, native Antigravity broker/multiple accounts, mobile resource limits and full selected feature matrix remain incomplete. Build success is not a claim that these features work. Android 16, Android 17, 4KB/16KB, KernelSU and real API tests have not been completed on a phone.
 
-```bash
-./gradlew :app:assembleRelease
-# 输出 app/build/outputs/apk/release/app-release.apk
-```
+## Cloud build
 
-注意：aarch64 Linux 主机（Google 只发布 x86_64 aapt2）需要 box64，构建时传 `./gradlew -Pandroid.aapt2FromMavenOverride=$PWD/tools/aapt2`（包装脚本会从 `ANDROID_HOME` 或 `local.properties` 的 sdk.dir 找 SDK）；x86_64 主机与 CI 直接构建即可。JDK 17+ 用环境默认（如需指定请自行在 gradle.properties 加 `org.gradle.java.home`）。签名配置在 `app/build.gradle.kts`（自带调试级 keystore，正式发布请更换）。
+The GitHub Actions workflow builds the runtime and ARM64 supervisor and copies its PIE executable to `app/src/main/jniLibs/arm64-v8a/libmobile_supervisor.so` before APK assembly. `extractNativeLibs` is enabled. Gradle packages the prepared native executable without rebuilding it.
 
-## 门禁（改接口层或合并上游后都要跑）
+Cloud signing reads `DSH_KEYSTORE_PATH`, `DSH_KEYSTORE_PASSWORD`, `DSH_KEY_ALIAS` and `DSH_KEY_PASSWORD` from the build environment. Without them, release output is unsigned. A CI-generated test key must not be described as a permanent user release key, and reinstall/upgrade requires the same key or explicit data export and uninstall. The repository's old public keystore is never used.
 
-三道都在 `dsh-mobile/tools/`，离线、不依赖设备：
+Cloud checks include `:app:testReleaseUnitTest`, `:app:lintRelease` and `:app:assembleRelease` as selected by the workflow. `WebOriginTest` rejects external origins, userinfo, alternate loopback names and ports. `GitCommandsTest` checks argv handling and path rejection. Installer tests cover archive policy separately. No Android environment or dependency downloads are needed on the local computer.
 
-```bash
-node dsh-mobile/tools/verify-tool-scripts.mjs       # 工具脚本语法
-node dsh-mobile/tools/verify-injected-selectors.mjs # 注入选择器是否仍命中新 DOM
-node dsh-mobile/tools/verify-mobile-ui.mjs          # 输入座留白 / 抽屉开合动画（真实资源 + Playwright）
-```
+## Device smoke (user performed)
 
-`verify-mobile-ui.mjs` 用 Playwright 加载**真实**的 `mobile.css`/`inject.js`，需要一份浏览器：
-`DSH_VERIFY_BROWSER=<可执行文件路径>` 指定；在 proot 容器里以 root 跑 chromium 会被
-SIGTRAP 掉（`Trace/breakpoint trap`），换成 `su nobody -c …` 之类的非 root 用户可解。
-它覆盖三组行为：容器重建后间隔块仍补偿输入座（#14）、**冷启动落在隐藏的 0 高输入座上时
-间隔块要能自愈且消息流保持贴底**（#16）、抽屉退出有过渡且 dsh 收起只发生在面板离屏之后（#15）。
-
-改了被覆盖的 harness 包（`dsh-mobile/tools/build-harness-overlay.mjs` 里的 `OVERLAY_PACKAGES`）之后，先 `pnpm run build:lib:host`，再 `node dsh-mobile/tools/build-harness-overlay.mjs` 重新导出 `app/src/main/assets/harness-overlay/`；再 `node dsh-mobile/tools/verify-harness-overlay.mjs`（需要 PATH 上有 `javac`）验证覆盖逻辑与资产哈希。
-
-## 结构
-
-- `BootstrapInstaller` — 下载/解压 rootfs、proot（Termux apt deb）、Node.js，容器内 `npm i -g @deepseek-ai/dsh`，随后应用 harness 补丁包
-- `HarnessOverlay` + `HarnessOverlayAssets` — 把 APK 内 `assets/harness-overlay/` 的补丁包覆盖到容器内的 harness 安装目录（按版本 + sha256 校验，纯 java.io 实现，可用 `dsh-mobile/tools/verify-harness-overlay.mjs` 在主机上跑回归）
-- `NodePtyFixer` — node-pty 原生模块（pty.node）自检与 node-gyp 重建（安装时与服务启动前双兜底）
-- `ProotRunner` — 组装 proot 命令（bind /dev /proc /sys /tmp /mnt/sd /mnt/shared）启动 `dsh web`
-- `HarnessService` — 前台服务持有容器进程，退出自动重启（上限 5 次）
-- `MainActivity` + `MobileUiInjector` — WebView + 注入 `assets/mobile.css` / `assets/inject.js`
-- `SettingsActivity` — SD 映射、端口、下载镜像、日志、重置
+1. Install the test APK, grant real KernelSU root only after reviewing setup, and verify installation fails clearly without root.
+2. Tap Start and confirm the authenticated Web page opens. Configure a provider in the Harness UI; never paste credentials into build logs.
+3. Run a small text conversation and an explicit file/tool request. Treat a model/network error or missing selected feature as a failed test, not a successful APK check.
+4. Try a file import/export, and capture a screenshot, preview it, export it, then manually attach the exported image.
+5. Stop the runtime from the notification and check for leftover processes/mounts. Do not assume the signal-group fallback catches escaped children.
+6. Record Android build, kernel, KernelSU configuration and page size. Background completion and automatic idle freezing are not accepted until their missing activity integration is implemented and tested.

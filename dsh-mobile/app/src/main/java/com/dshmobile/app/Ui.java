@@ -132,4 +132,13 @@ public final class Ui {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(ctx, 0.5f)));
         return v;
     }
+    /** Keeps native controls outside edge-to-edge system bars and the visible IME. */
+    public static void content(android.app.Activity activity, View view) {
+        int left=view.getPaddingLeft(),top=view.getPaddingTop(),right=view.getPaddingRight(),bottom=view.getPaddingBottom();
+        view.setOnApplyWindowInsetsListener((v,insets)->{
+            v.setPadding(left+insets.getSystemWindowInsetLeft(),top+insets.getSystemWindowInsetTop(),right+insets.getSystemWindowInsetRight(),bottom+insets.getSystemWindowInsetBottom());
+            return insets;
+        });
+        activity.setContentView(view);
+    }
 }

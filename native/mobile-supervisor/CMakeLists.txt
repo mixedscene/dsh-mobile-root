@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(mobile_supervisor C)
+add_executable(mobile_supervisor supervisor.c)
+set_target_properties(mobile_supervisor PROPERTIES OUTPUT_NAME libmobile_supervisor.so)
+target_compile_definitions(mobile_supervisor PRIVATE _GNU_SOURCE)
+target_compile_options(mobile_supervisor PRIVATE -Wall -Wextra -Werror -fPIE)
+target_link_options(mobile_supervisor PRIVATE -pie -Wl,-z,max-page-size=16384)

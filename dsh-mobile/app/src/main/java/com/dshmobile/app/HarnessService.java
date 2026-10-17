@@ -1,430 +1,101 @@
 package com.dshmobile.app;
 
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.PendingIntent;
-import android.app.Service;
-import android.content.Context;
-import android.content.Intent;
-import android.os.Build;
-import android.os.IBinder;
-import android.os.PowerManager;
+import android.app.*;
+import android.content.*;
+import android.os.*;
+import java.io.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.regex.*;
 
-import java.io.File;
-import java.io.IOException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
-/** 前台服务：持有 proot 容器进程，保证后台存活。 */
-public class HarnessService extends Service {
-
-    public static final String ACTION_START = "com.dshmobile.app.action.START";
-    public static final String ACTION_STOP = "com.dshmobile.app.action.STOP";
-    private static final String CHANNEL_ID = "harness";
-    private static final int NOTIF_ID = 1001;
-    private static final int MAX_RESTART = 5;
-    /** dsh 插件加载失败行：命中即捕获括号里的包名。 */
-    private static final java.util.regex.Pattern BROKEN_PLUGIN =
-            java.util.regex.Pattern.compile("failed to import loader entry \\S+ \\(([^)]+)\\)");
-
-    private static Process process;
-    private static Process sshdProcess;
-    private static boolean running;
-    /** dsh web 启动时打印的带 token 认证 URL（当前进程），供 WebView 首登。 */
-    private static volatile String webAuthUrl;
-    /** pump 线程本进程内检测到的加载失败插件包名（供退出后隔离）。 */
-    private volatile String brokenPlugin;
-    /** 已隔离过的插件，避免同一插件反复触发隔离-重启循环。 */
-    private final java.util.Set<String> quarantined = new java.util.HashSet<>();
-
-    private ExecutorService executor;
-    private PowerManager.WakeLock wakeLock;
-    private volatile boolean wantRun;
-    /** 本服务进程是否还没尝试过把容器内 dsh 对齐到补丁包目标版本。 */
-    private boolean alignAttempted = true;
-
-    public static boolean isRunning() {
-        return running && process != null && process.isAlive();
-    }
-
-    /** @return 当前 dsh web 的认证 URL；尚未打印或不匹配当前端口时为 null。 */
-    public static String getWebAuthUrl() {
-        return webAuthUrl;
-    }
-
-    public static void startService(Context ctx) {
-        Intent i = new Intent(ctx, HarnessService.class);
-        i.setAction(ACTION_START);
-        ctx.startForegroundService(i);
-    }
-
-    public static void stopService(Context ctx) {
-        Intent i = new Intent(ctx, HarnessService.class);
-        i.setAction(ACTION_STOP);
-        ctx.startService(i);
-    }
-
-    @Override
-    public void onCreate() {
+/** Owns one explicit runtime generation. Unknown task activity never implies idle. */
+public final class HarnessService extends Service {
+    public static final String STOP = "com.dshmobile.app.STOP";
+    private static final String CHANNEL = "runtime";
+    private final ExecutorService control = Executors.newSingleThreadExecutor();
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final Set<Runnable> listeners = new HashSet<>();
+    private final ArrayDeque<String> logs = new ArrayDeque<>();
+    private volatile String state = "Stopped", launchUrl;
+    private volatile boolean starting, stopping;
+    private volatile Process process;
+    public final class LocalBinder extends Binder { public HarnessService service() { return HarnessService.this; } }
+    @Override public IBinder onBind(Intent intent) { return new LocalBinder(); }
+    @Override public void onCreate() {
         super.onCreate();
-        executor = Executors.newSingleThreadExecutor();
-        createChannel();
+        getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel(CHANNEL, "Runtime", NotificationManager.IMPORTANCE_LOW));
     }
-
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        String action = intent == null ? ACTION_START : intent.getAction();
-        if (ACTION_STOP.equals(action)) {
-            wantRun = false;
-            // 停止必须真正杀掉容器与全部服务（通知栏的「停止」= 关机语义）。
-            // 绝不能放进 executor：runLoop 永久占着单线程（while 循环阻塞在
-            // process.waitFor()），stop 任务会排在它后面永远执行不到——
-            // 通知栏停止和设置页停止/重启因此全部失效。独立线程执行停止。
-            new Thread(() -> {
-                stopContainer();
-                stopForeground(true);
-                stopSelf();
-            }, "dsh-harness-stop").start();
-            return START_NOT_STICKY;
-        }
-        startForeground(NOTIF_ID, buildNotification("正在启动容器…"));
-        acquireWakeLock();
-        wantRun = true;
-        if (!isRunning()) {
-            executor.execute(this::runLoop);
-        }
-        return START_STICKY;
+    @Override public int onStartCommand(Intent intent, int flags, int id) {
+        startForeground(1, notification());
+        if (intent != null && STOP.equals(intent.getAction())) stopRuntime(); else startRuntime();
+        return START_NOT_STICKY;
     }
-
-    private void runLoop() {
-        Prefs prefs = Prefs.of(this);
-        int restarts = 0;
-        while (wantRun) {
-            File log = new File(ProotRunner.baseDir(this), "dsh-web.log");
-            // 启动前自检 node-pty：pty.node 缺失时 dsh web 必崩（plugin tree
-            // failed to load），先就地修复再启动，避免无意义的崩溃-重启循环
-            if (NodePtyFixer.needsFix(ProotRunner.rootfsDir(this))) {
-                updateNotification("正在修复 node-pty 原生模块…");
-                boolean fixed = NodePtyFixer.fix(this, log);
-                updateNotification(fixed
-                        ? "node-pty 修复完成，正在启动…"
-                        : "node-pty 修复失败，请到设置查看日志");
-            }
-            // 覆盖层自愈：用户在容器里重装/升级过 dsh 会把本仓库的补丁包冲掉，
-            // 内容一致时这里不做任何写入。
-            ensureHarnessOverlay(log);
-            final int port = prefs.getPort();
+    private Notification notification() {
+        PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, HarnessService.class).setAction(STOP), PendingIntent.FLAG_IMMUTABLE);
+        return new Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.ic_media_play).setContentTitle("DSH Root")
+            .setContentText(state).setContentIntent(open).setOngoing(true).addAction(new Notification.Action.Builder(null, "Stop runtime", stop).build()).build();
+    }
+    public String state() { return state; }
+    public String launchUrl() { return launchUrl; }
+    public synchronized String diagnostics() { return String.join("\n", logs); }
+    public void observe(Runnable listener) { listeners.add(listener); listener.run(); }
+    public void removeObserver(Runnable listener) { listeners.remove(listener); }
+    private void publish(String value) {
+        state = value;
+        synchronized (this) { if (logs.size() == 120) logs.removeFirst(); logs.addLast(new Date() + " " + value); }
+        main.post(() -> {
+            getSystemService(NotificationManager.class).notify(1, notification());
+            for (Runnable r : new ArrayList<>(listeners)) r.run();
+        });
+    }
+    private void startRuntime() {
+        if (starting || stopping || process != null) return;
+        starting = true;
+        publish("Starting root runtime");
+        control.execute(() -> {
             try {
-                updateNotification("DeepSeek Harness 运行中 · 端口 " + port);
-                // 先起 Web：容器 SSH 要 apt 装 openssh，网络差时可能耗时数十秒甚至
-                // 失败重试，绝不能挡在 Web 关键路径前（否则界面迟迟进不去）。
-                webAuthUrl = null;
-                process = ProotRunner.startWeb(this, port);
-                running = true;
-                final Process p = process;
-                Thread pump = new Thread(() -> pumpWebOutput(p, log, port), "dsh-web-log");
-                pump.setDaemon(true);
-                pump.start();
-                startSshdAsync(prefs);
-                int code = process.waitFor();
-                // 等 pump 把退出前的最后几行（含插件加载错误）读完，否则可能
-                // waitFor 先返回、brokenPlugin 还没被设置
-                try {
-                    pump.join(2000);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                }
-                running = false;
-                if (!wantRun) break;
-                // 插件加载失败会拖垮整个 dsh web（plugin tree failed to load）。
-                // 先把它从 profile 的 bundles 里摘掉再重启，让 UI 能起来；隔离本身
-                // 不计入重启次数，避免和普通崩溃互相挤占配额。
-                String broken = brokenPlugin;
-                brokenPlugin = null;
-                if (broken != null && quarantined.add(broken) && quarantinePlugin(broken)) {
-                    updateNotification("插件 " + broken + " 与当前 dsh 不兼容，已临时禁用并重启");
-                    Thread.sleep(1000);
-                    continue;
-                }
-                restarts++;
-                if (restarts > MAX_RESTART) {
-                    updateNotification("容器多次退出，已停止（详见日志）");
-                    break;
-                }
-                updateNotification("容器退出(" + code + ")，" + 3 + " 秒后重启…");
-                Thread.sleep(3000);
-            } catch (IOException e) {
-                running = false;
-                updateNotification("启动失败: " + e.getMessage());
-                break;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
+                if (!RootRuntime.installed(this)) throw new IOException("Runtime not installed");
+                process = RootRuntime.startWeb(this, 3080);
+                publish("Running; task activity unknown; automatic freeze disabled");
+                Process owned = process;
+                Thread reader = new Thread(() -> readOutput(owned), "runtime-output");
+                reader.start();
+                new Thread(() -> {
+                    try { int code = owned.waitFor(); main.post(() -> {
+                        if (process == owned) { process = null; launchUrl = null; publish("Runtime exited: " + code + ". Restart is manual."); }
+                    }); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                }, "runtime-exit").start();
+            } catch (Exception e) { publish("Start failed. Check root authorization and installed runtime; no automatic retry."); }
+            finally { starting = false; }
+        });
+    }
+    private void readOutput(Process owned) {
+        Pattern url = Pattern.compile("dsh web: (http://127\\.0\\.0\\.1:[0-9]+/\\?token=[^\\s]+)");
+        try (BufferedReader in = new BufferedReader(new InputStreamReader(owned.getInputStream()))) {
+            StringBuilder line = new StringBuilder(); boolean oversized = false; int ch;
+            while ((ch = in.read()) != -1) {
+                if (ch == 10) {
+                    if (!oversized) { Matcher match = url.matcher(line); if (match.find()) { launchUrl = match.group(1); publish("Web UI ready. Task activity unknown; automatic freeze disabled"); } }
+                    line.setLength(0); oversized = false;
+                } else if (line.length() < 16384) line.append((char)ch); else oversized = true;
+                // Never log process output: it can contain user content and credentials.
             }
-        }
-        running = false;
-        releaseWakeLock();
-        if (!wantRun) {
-            stopForeground(true);
-            stopSelf();
-        }
+        } catch (IOException e) { publish("Runtime output stream closed"); }
     }
-
-    /**
-     * 实时吞掉 dsh web 的 stdout：逐行写入日志，并抓取带 token 的认证 URL。
-     * 用管道而非文件重定向解析日志，既避免文件 flush 延迟/旧进程残留 token，
-     * 也让 MainActivity 能立刻拿到当前进程的认证 URL。
-     */
-    private void pumpWebOutput(Process p, File log, int port) {
-        java.io.FileWriter w = null;
-        try {
-            w = new java.io.FileWriter(log, true);
-        } catch (Exception ignored) {
-            // 日志不可写也不能停读管道：否则子进程 stdout 塞满会卡死
-        }
-        try (java.io.BufferedReader r = new java.io.BufferedReader(
-                new java.io.InputStreamReader(p.getInputStream(), "UTF-8"))) {
-            String line;
-            while ((line = r.readLine()) != null) {
-                if (w != null) {
-                    try {
-                        w.write(line);
-                        w.write('\n');
-                        w.flush();
-                    } catch (Exception ignored) {
-                        // 单行写失败忽略，继续读
-                    }
-                }
-                String auth = ProotRunner.extractAuthUrl(line, port);
-                if (auth != null) webAuthUrl = auth;
-                // dsh 0.1.5 插件加载失败会整树失败：
-                //   failed to import loader entry <id> (<pkg>): ...
-                // 记下包名，进程退出后隔离它。
-                java.util.regex.Matcher m = BROKEN_PLUGIN.matcher(line);
-                if (m.find()) brokenPlugin = m.group(1);
-            }
-        } catch (Exception ignored) {
-            // 进程结束/管道关闭：正常退出路径
-        } finally {
-            if (w != null) {
-                try {
-                    w.close();
-                } catch (Exception ignored) {
-                }
-            }
-        }
+    public void stopRuntime() {
+        if (stopping) return;
+        stopping = true;
+        control.execute(() -> {
+            try { RootRuntime.stop(this); launchUrl = null; process = null; publish("Stopped"); main.post(() -> { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); }); }
+            catch (IOException e) { publish("Stop failed; cleanup not confirmed. Retry Stop explicitly."); }
+            finally { stopping = false; }
+        });
     }
-
-    /**
-     * 把加载失败的插件从 profile 的 `dsh.profile.bundles` 里摘掉（只动用户依赖，
-     * 绝不碰模板 bundle），这样 `dsh web` 能跳过它正常启动。插件文件仍保留在
-     * node_modules；用户之后用 `dsh plugin --profile web add <spec>` 重装兼容版本时，
-     * reconcile 会把它重新加回 bundles。
-     *
-     * @param pkg 失败插件包名（来自启动日志）
-     * @return 确实修改了 profile 清单才返回 true
-     */
-    private boolean quarantinePlugin(String pkg) {
-        File manifest = new File(ProotRunner.homeDir(this), ".dsh/profiles/web/package.json");
-        if (!manifest.isFile()) return false;
-        try {
-            String text = new String(java.nio.file.Files.readAllBytes(manifest.toPath()),
-                    java.nio.charset.StandardCharsets.UTF_8);
-            org.json.JSONObject root = new org.json.JSONObject(text);
-            org.json.JSONObject deps = root.optJSONObject("dependencies");
-            if (deps == null || !deps.has(pkg)) return false;
-            org.json.JSONObject dsh = root.optJSONObject("dsh");
-            org.json.JSONObject profile = dsh == null ? null : dsh.optJSONObject("profile");
-            org.json.JSONArray bundles = profile == null ? null : profile.optJSONArray("bundles");
-            if (bundles == null) return false;
-            boolean removed = false;
-            for (int i = bundles.length() - 1; i >= 0; i--) {
-                if (pkg.equals(bundles.optString(i))) {
-                    bundles.remove(i);
-                    removed = true;
-                }
-            }
-            if (!removed) return false;
-            java.nio.file.Files.write(manifest.toPath(),
-                    root.toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    /**
-     * 启动前自愈本仓库的 harness 覆盖层。
-     *
-     * <p>容器内的 {@code @deepseek-ai/dsh} 来自 npm，用户重装或升级它之后覆盖就失效
-     * 了；这里在每次启动前检查内容哈希，不一致才重新覆盖（一致时零写入）。
-     *
-     * <p>已有容器里装的可能是旧版 dsh，而补丁包只对目标版本做过校验——那就先把版本
-     * 对齐（联网 npm 装包，只在本服务进程里尝试一次），再走哈希覆盖。
-     *
-     * @param logFile 追加写覆盖摘要的服务日志
-     */
-    private void ensureHarnessOverlay(File logFile) {
-        try {
-            File overlayDir = HarnessOverlayAssets.extract(this, new File(getCacheDir(), "harness-overlay"));
-            File rootfs = ProotRunner.rootfsDir(this);
-            String targetVersion = HarnessOverlay.targetVersion(overlayDir);
-            if (alignAttempted && targetVersion != null
-                    && !targetVersion.equals(HarnessOverlay.installedHarnessVersion(rootfs))) {
-                alignAttempted = false;
-                updateNotification("正在对齐容器内 dsh 到 " + targetVersion + "…");
-                BootstrapInstaller.alignHarnessVersion(this, targetVersion, logFile);
-            }
-            if (!HarnessOverlay.needsApply(rootfs, overlayDir)) return;
-            updateNotification("正在应用本仓库补丁包…");
-            appendServiceLog(logFile, HarnessOverlay.apply(rootfs, overlayDir));
-        } catch (Exception e) {
-            appendServiceLog(logFile, "harness 覆盖层自愈失败（继续使用上游 npm 包）: " + e);
-        }
-    }
-
-    /** 追加一段摘要到服务日志文件；写日志失败不影响服务启动。 */
-    private static void appendServiceLog(File logFile, String text) {
-        try {
-            java.nio.file.Files.write(logFile.toPath(),
-                    ("\n[harness-overlay] " + text + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
-        } catch (Exception ignored) {
-            // 日志不可写（磁盘满/权限）不该阻断服务启动；覆盖结果本身已经写在
-            // 通知与下一次 needsApply 的一致性检查里。
-        }
-    }
-
-    /**
-     * 后台启动 SSH：apt 装 openssh 可能很慢甚至失败，单独跑在别的线程并写自己的
-     * 日志（dsh-sshd.log），既不拖住 Web，也不把 dsh-web.log 刷满 apt 噪音。
-     */
-    private void startSshdAsync(Prefs prefs) {
-        new Thread(() -> {
-            File sshLog = new File(ProotRunner.baseDir(this), "dsh-sshd.log");
-            startSshd(prefs, sshLog);
-        }, "dsh-sshd-boot").start();
-    }
-
-    /** 启动容器内 sshd：老容器没有就先联网补装（失败不影响 Web 服务）。 */
-    private void startSshd(Prefs prefs, File log) {
-        BootstrapInstaller.ensureSshServerInstalled(this, log);
-        if (!new File(ProotRunner.rootfsDir(this), "usr/sbin/sshd").isFile()) return;
-        if (sshdProcess != null && sshdProcess.isAlive()) return;
-        try {
-            sshdProcess = ProotRunner.startSshd(this, prefs.getSshPort(), log);
-        } catch (IOException e) {
-            updateNotification("SSH 启动失败: " + e.getMessage());
-        }
-    }
-
-    private void stopContainer() {
-        // 状态先置 false：设置页/按钮立即反映"已停止"，
-        // 不必等强杀兜底（最长 3s）走完
-        running = false;
-        webAuthUrl = null;
-        Process p = process;
-        if (p != null) {
-            p.destroy();
-            try {
-                // 有界等待：容器卡住不退时不能无限阻塞（调用方可能在主线程）
-                if (!p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
-                    p.destroyForcibly();
-                }
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-                p.destroyForcibly();
-            }
-        }
-        Process s = sshdProcess;
-        sshdProcess = null;
-        if (s != null) {
-            s.destroy();
-            s.destroyForcibly();
-        }
-        running = false;
-    }
-
-    private void acquireWakeLock() {
-        if (wakeLock == null) {
-            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dshmobile:harness");
-            wakeLock.setReferenceCounted(false);
-        }
-        if (!wakeLock.isHeld()) {
-            wakeLock.acquire(24 * 60 * 60 * 1000L);
-        }
-    }
-
-    private void releaseWakeLock() {
-        if (wakeLock != null && wakeLock.isHeld()) {
-            wakeLock.release();
-        }
-    }
-
-    private void createChannel() {
-        NotificationManager nm = getSystemService(NotificationManager.class);
-        NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Harness 服务",
-                NotificationManager.IMPORTANCE_LOW);
-        ch.setDescription("DeepSeek Harness 容器运行状态");
-        nm.createNotificationChannel(ch);
-    }
-
-    private Notification buildNotification(String text) {
-        Intent open = new Intent(this, MainActivity.class);
-        PendingIntent pi = PendingIntent.getActivity(this, 0, open,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Intent stop = new Intent(this, HarnessService.class);
-        stop.setAction(ACTION_STOP);
-        PendingIntent stopPi = PendingIntent.getService(this, 1, stop,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Notification.Builder b = Build.VERSION.SDK_INT >= 31
-                ? new Notification.Builder(this, CHANNEL_ID)
-                : new Notification.Builder(this, CHANNEL_ID);
-        return b.setContentTitle(getString(R.string.app_name))
-                .setContentText(text)
-                .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                .setContentIntent(pi)
-                .addAction(new Notification.Action.Builder(null, "停止", stopPi).build())
-                .setOngoing(true)
-                .build();
-    }
-
-    private void updateNotification(String text) {
-        NotificationManager nm = getSystemService(NotificationManager.class);
-        nm.notify(NOTIF_ID, buildNotification(text));
-    }
-
-    @Override
-    public void onDestroy() {
-        wantRun = false;
-        stopContainer();
-        releaseWakeLock();
-        if (executor != null) executor.shutdownNow();
+    @Override public void onDestroy() {
+        listeners.clear();
+        control.execute(() -> { try { RootRuntime.stop(this); } catch (IOException e) { /* Service death cannot confirm cleanup. */ } });
+        control.shutdown();
         super.onDestroy();
-    }
-
-    @Override
-    public IBinder onBind(Intent intent) {
-        return null;
-    }
-
-    @Override
-    public void onTaskRemoved(Intent rootIntent) {
-        // 划卡清任务时最后一搏：趁进程还没被杀，尝试把服务重新拉起来。
-        // Android 12+ 后台起前台服务可能抛异常（ForegroundServiceStartNotAllowed
-        // 等），拦住即可；荣耀/MagicOS 这类划卡杀整进程的 ROM，最终要靠用户在
-        // 系统设置里给本应用开「自启动/允许后台活动」（设置页有入口）。
-        if (wantRun) {
-            try {
-                Intent restart = new Intent(this, HarnessService.class);
-                restart.setAction(ACTION_START);
-                startForegroundService(restart);
-            } catch (Exception e) {
-                // 后台启动限制：无系统侧授权时无法绕过，交给 START_STICKY 与用户授权兜底
-            }
-        }
-        super.onTaskRemoved(rootIntent);
     }
 }
