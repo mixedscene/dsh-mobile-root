@@ -169,7 +169,7 @@ def trim_optional_resources(root):
     alternatives = root / "etc/alternatives"
     if alternatives.is_dir() and not alternatives.is_symlink():
         for leaf in sorted(alternatives.iterdir()):
-            if not leaf.is_symlink() or not re.search(r"\.[1-9][a-z]*(?:\.(?:gz|xz|bz2))?$", leaf.name, re.I) or PROTECTED.match(leaf.name):
+            if not leaf.is_symlink() or PROTECTED.match(leaf.name):
                 continue
             target = os.readlink(leaf)
             normalized = posixpath.normpath(posixpath.join("/etc/alternatives", target))

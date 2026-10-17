@@ -156,11 +156,19 @@ class DocumentationTests(unittest.TestCase):
             manual.write_text("optional manual")
             self.link(alternatives / "awk", "/usr/bin/gawk")
             self.link(alternatives / "awk.1.gz", "/usr/share/man/man1/gawk.1.gz")
+            for language in ["de", "ja"]:
+                localized = root / f"usr/share/man/{language}/man1/which.debianutils.1.gz"
+                localized.parent.mkdir(parents=True)
+                localized.write_text("optional translated manual")
+                self.link(alternatives / f"which.{language}1.gz", f"/usr/share/man/{language}/man1/which.debianutils.1.gz")
             report = docs.trim_optional_resources(root)
             self.assertTrue((alternatives / "awk").is_symlink())
             self.assertEqual(binary.read_text(), "runtime binary")
             self.assertFalse((alternatives / "awk.1.gz").is_symlink())
-            self.assertEqual(report["removedManualAliases"], [{"path": "etc/alternatives/awk.1.gz", "target": "/usr/share/man/man1/gawk.1.gz"}])
+            self.assertEqual(len(report["removedManualAliases"]), 3)
+            self.assertEqual(report["removedManualAliases"][0], {"path": "etc/alternatives/awk.1.gz", "target": "/usr/share/man/man1/gawk.1.gz"})
+            self.assertFalse((alternatives / "which.de1.gz").is_symlink())
+            self.assertFalse((alternatives / "which.ja1.gz").is_symlink())
 
 
 if __name__ == "__main__":
