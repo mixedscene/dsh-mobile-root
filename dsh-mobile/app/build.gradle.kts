@@ -9,8 +9,8 @@ android {
         applicationId = "io.github.mixedscene.dshroot"
         minSdk = 26
         targetSdk = 36
-        versionCode = 42
-        versionName = "0.1.0-root-preview"
+        versionCode = 43
+        versionName = "0.1.1-root-preview"
         ndk { abiFilters += "arm64-v8a" }
 }
     val signingPath = System.getenv("DSH_KEYSTORE_PATH")
@@ -30,6 +30,7 @@ android {
         debug { applicationIdSuffix = ".debug" }
     }
     packaging { jniLibs { useLegacyPackaging = true } }
+    androidResources { noCompress += "payload" }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

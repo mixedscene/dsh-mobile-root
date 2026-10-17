@@ -26,6 +26,8 @@ public final class RuntimeInstaller {
     public interface Progress { void onProgress(String message); }
     private static final long MAX_EXPANDED = 4L * 1024 * 1024 * 1024;
     private static final int MAX_ENTRIES = 500000;
+    // AGP automatically expands assets ending in .gz during mergeAssets.
+    private static final String ARCHIVE_ASSET = "runtime/runtime.payload";
     private RuntimeInstaller() {}
 
     public static boolean isInstalled(Context c) {
@@ -85,7 +87,7 @@ public final class RuntimeInstaller {
         progress.onProgress("Verifying bundled ARM64 runtime SHA-256");
         try {
             MessageDigest digest=MessageDigest.getInstance("SHA-256");
-            try(InputStream in=c.getAssets().open("runtime/runtime.tar.gz")) {
+            try(InputStream in=c.getAssets().open(ARCHIVE_ASSET)) {
                 byte[] bytes=new byte[65536]; int n;
                 while((n=in.read(bytes))>=0) { cancelled(); digest.update(bytes,0,n); }
             }
@@ -99,7 +101,7 @@ public final class RuntimeInstaller {
             progress.onProgress("Extracting verified runtime (no scripts or network installs)");
             Set<String> seen=new HashSet<>(),seenRegular=new HashSet<>(); long total=0; int entries=0;
             String prefix=stage.getCanonicalPath()+File.separator;
-            try(TarArchiveInputStream tar=new TarArchiveInputStream(new GZIPInputStream(c.getAssets().open("runtime/runtime.tar.gz")))) {
+            try(TarArchiveInputStream tar=new TarArchiveInputStream(new GZIPInputStream(c.getAssets().open(ARCHIVE_ASSET)))) {
                 TarArchiveEntry entry;
                 while((entry=tar.getNextTarEntry())!=null) {
                     cancelled();

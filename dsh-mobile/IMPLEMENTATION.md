@@ -15,6 +15,7 @@ The handoff plan remains the target, not a list of completed features. This bran
 
 ## Important distinctions
 
+- The APK embeds the gzip runtime as `assets/runtime/runtime.payload` because Android asset merging expands and renames `.gz` inputs. CI verifies the final APK asset names, unchanged manifest, gzip header, and archive SHA-256 before upload.
 - The runtime is an aggregate Linux userspace, not Android/Bionic-native Node and not a security-certified sandbox. UID 65534 is the shared nobody identity, not a guaranteed dedicated Android sandbox.
 - A process-group SIGSTOP fallback is not cgroup containment. It is not selected automatically while task coverage is incomplete.
 - The fixed published CLI still carries transitive code for some features that the mobile profile does not mount. This release does not claim complete dependency-byte pruning.

@@ -25,6 +25,7 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 dsh-mobile/tools/verify-root-release.py
+      - run: python3 -m unittest discover -s dsh-mobile/tools -p 'test_apk_runtime.py' -v
       - run: bash native/mobile-supervisor/test-host.sh
       - run: python3 -m unittest discover -s dsh-mobile/runtime -p 'test_*.py' -v
       - uses: actions/setup-node@v4
@@ -90,6 +91,8 @@ jobs:
         with:
           name: arm64-runtime
           path: dsh-mobile/app/src/main/assets/runtime
+      - name: Preserve gzip bytes through Android asset merging
+        run: mv dsh-mobile/app/src/main/assets/runtime/runtime.tar.gz dsh-mobile/app/src/main/assets/runtime/runtime.payload
       - name: Build Android PIE supervisor and stage the executable as an extracted native library
         run: |
           cmake -S native/mobile-supervisor -B "$RUNNER_TEMP/supervisor-build" \
@@ -110,7 +113,7 @@ jobs:
           cd dsh-mobile/app/src/main/assets/runtime
           python3 - <<'PY'
           import hashlib, json, pathlib
-          p = pathlib.Path('runtime.tar.gz')
+          p = pathlib.Path('runtime.payload')
           manifest = json.loads(pathlib.Path('runtime-manifest.json').read_text())
           assert hashlib.file_digest(p.open('rb'), 'sha256').hexdigest() == manifest['sha256']
           PY
@@ -126,6 +129,8 @@ jobs:
         run: |
           mkdir -p dist
           cp dsh-mobile/app/build/outputs/apk/debug/app-debug.apk dist/DSH-Root-arm64-test.apk
+          python3 dsh-mobile/tools/verify-apk-runtime.py dist/DSH-Root-arm64-test.apk \
+            --manifest dsh-mobile/app/src/main/assets/runtime/runtime-manifest.json > dist/runtime-asset-check.txt
           "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 dist/DSH-Root-arm64-test.apk > dist/zipalign.txt
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs dist/DSH-Root-arm64-test.apk > dist/signature.txt
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging dist/DSH-Root-arm64-test.apk > dist/apk-info.txt
