@@ -3,6 +3,7 @@ set -euo pipefail
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 cc -D_GNU_SOURCE -Wall -Wextra -Werror -fPIE -pie "$(dirname "$0")/supervisor.c" -o "$out/supervisor"
+cc -D_GNU_SOURCE -Wall -Wextra -Werror -fPIE -pie "$(dirname "$0")/test-lifecycle.c" -o "$out/lifecycle"
 set +e
 "$out/supervisor" probe >"$out/nonroot.log" 2>&1
 nonroot=$?
@@ -15,3 +16,4 @@ test "$nonroot" -eq 77
 test "$invalid" -eq 2
 test "$missing" -eq 2
 echo 'Host CLI refusal checks passed (not a chroot/device test).'
+sudo "$out/lifecycle"

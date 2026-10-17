@@ -7,6 +7,11 @@ import static org.junit.Assert.assertThrows;
 
 /** Exercises the same pure validation used before each extracted file is opened. */
 public final class RuntimeInstallerTest {
+    @Test public void installedManifestMustMatchBundledBuildExactly() throws Exception {
+        byte[] original="build-id-original sha256-original".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        RuntimeArchivePolicy.manifest(original,original.clone());
+        assertThrows(IOException.class,()->RuntimeArchivePolicy.manifest(original,"build-id-new sha256-new".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    }
     @Test public void acceptsRuntimePaths() throws Exception {
         assertEquals("opt/node/bin/node",RuntimeArchivePolicy.name("./opt/node/bin/node",false));
         assertEquals("",RuntimeArchivePolicy.name("./",true));

@@ -24,4 +24,7 @@ final class RuntimeArchivePolicy {
     static void hash(String expected,String actual) throws IOException {
         if(!expected.matches("[0-9a-f]{64}")||!expected.equals(actual)) throw new IOException("Runtime archive hash mismatch");
     }
+    static void manifest(byte[] bundled,byte[] installed) throws IOException {
+        if(!Arrays.equals(bundled,installed)) throw new IOException("Installed runtime differs from this APK; explicit migration/recovery required");
+    }
 }

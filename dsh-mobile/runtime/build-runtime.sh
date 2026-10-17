@@ -57,8 +57,11 @@ cd /opt/dsh-mobile/install
 printf '{"name":"dsh-mobile-installation","private":true,"type":"module"}\n' > package.json
 npm install --omit=dev --no-audit --no-fund --save-exact @deepseek-ai/dsh@0.2.1-alpha.2 pnpm@11.28.5 js-yaml@4.3.2
 node /opt/dsh-mobile/generate-mobile.mjs /opt/dsh-mobile/build-input /opt/dsh-mobile/mobile-bundle /opt/dsh-mobile/install
-# npm file dependencies are links; the safe archive writer materializes their confined targets.
-npm install --omit=dev --no-audit --no-fund --save-exact /opt/dsh-mobile/mobile-bundle
+# A directory dependency becomes an external npm link without installing its graph.
+# Install a packed artifact so npm owns and validates the entire mobile dependency graph.
+mobile_bundle_tar=$(npm pack --silent /opt/dsh-mobile/mobile-bundle --pack-destination /opt/dsh-mobile)
+npm install --omit=dev --no-audit --no-fund --save-exact "/opt/dsh-mobile/$mobile_bundle_tar"
+node -e 'const p=require.resolve("@dsh-mobile/runtime-bundle/package.json"); const m=require(p); if(m.name!=="@dsh-mobile/runtime-bundle" || !m.dsh?.bundle?.patch)throw Error("Invalid installed mobile bundle"); console.log("Installed mobile bundle:",p)'
 npm list --all --json > /opt/dsh-mobile/licenses/npm-dependency-versions.json
 cp package-lock.json /opt/dsh-mobile/licenses/npm-package-lock.json
 ln -s /opt/dsh-mobile/install/node_modules/.bin/dsh /usr/local/bin/dsh

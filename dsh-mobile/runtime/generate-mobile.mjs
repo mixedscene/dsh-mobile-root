@@ -35,6 +35,7 @@ const excluded = new Set([
 for (const id of excluded) rows.delete(id)
 rows.get('session-query-sqlite').config = { path: new Expression("dshHomePath('query', 'sessions.sqlite')"), openAt: 'first-search' }
 rows.get('agent-preset-registry').config = { default: 'mobile' }
+rows.get('subagent').config = { maxActiveSubagents: 2, maxDepth: 1 }
 const preset = load('packages/bundle/web-app/presets/standard.patch.yml')[0].insert[0]
 preset.id = 'preset-mobile'
 preset.config.id = 'mobile'
@@ -66,6 +67,7 @@ mkdirSync(destination, { recursive: true })
 writeFileSync(join(destination, 'cordis.patch.yml'), yaml.dump([{ insert: [...rows.values()] }], { schema, lineWidth: -1, noRefs: true }))
 writeFileSync(join(destination, 'package.json'), JSON.stringify({
   name: '@dsh-mobile/runtime-bundle', version: '0.1.0', private: true, type: 'module', license: 'MIT',
+  files: ['cordis.patch.yml', 'selection.json'],
   exports: { './package.json': './package.json' },
   dsh: { bundle: { patch: './cordis.patch.yml' } }, dependencies,
 }, null, 2) + '\n')

@@ -3,6 +3,7 @@ package com.dshmobile.app;
 import android.app.*;
 import android.content.*;
 import android.os.*;
+import java.lang.Process;
 import java.io.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -18,6 +19,7 @@ public final class HarnessService extends Service {
     private final ArrayDeque<String> logs = new ArrayDeque<>();
     private volatile String state = "Stopped", launchUrl;
     private volatile boolean starting, stopping;
+    private volatile boolean destroyed;
     private volatile Process process;
     public final class LocalBinder extends Binder { public HarnessService service() { return HarnessService.this; } }
     @Override public IBinder onBind(Intent intent) { return new LocalBinder(); }
@@ -45,6 +47,7 @@ public final class HarnessService extends Service {
         state = value;
         synchronized (this) { if (logs.size() == 120) logs.removeFirst(); logs.addLast(new Date() + " " + value); }
         main.post(() -> {
+            if(destroyed) return;
             getSystemService(NotificationManager.class).notify(1, notification());
             for (Runnable r : new ArrayList<>(listeners)) r.run();
         });
@@ -63,7 +66,7 @@ public final class HarnessService extends Service {
                 reader.start();
                 new Thread(() -> {
                     try { int code = owned.waitFor(); main.post(() -> {
-                        if (process == owned) { process = null; launchUrl = null; publish("Runtime exited: " + code + ". Restart is manual."); }
+                        if (process == owned) { process = null; launchUrl = null; if(!stopping&&!destroyed) publish("Runtime exited: " + code + ". Restart is manual."); }
                     }); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                 }, "runtime-exit").start();
             } catch (Exception e) { publish("Start failed. Check root authorization and installed runtime; no automatic retry."); }
@@ -76,12 +79,19 @@ public final class HarnessService extends Service {
             StringBuilder line = new StringBuilder(); boolean oversized = false; int ch;
             while ((ch = in.read()) != -1) {
                 if (ch == 10) {
-                    if (!oversized) { Matcher match = url.matcher(line); if (match.find()) { launchUrl = match.group(1); publish("Web UI ready. Task activity unknown; automatic freeze disabled"); } }
+                    if (!oversized) { Matcher match = url.matcher(line); if (match.find()) {
+                        String candidate=match.group(1);
+                        main.post(() -> {
+                            if(process==owned&&!stopping&&!destroyed) {
+                                launchUrl=candidate; publish("Web UI ready. Task activity unknown; automatic freeze disabled");
+                            }
+                        });
+                    } }
                     line.setLength(0); oversized = false;
                 } else if (line.length() < 16384) line.append((char)ch); else oversized = true;
                 // Never log process output: it can contain user content and credentials.
             }
-        } catch (IOException e) { publish("Runtime output stream closed"); }
+        } catch (IOException e) {main.post(() -> {if(process==owned&&!stopping&&!destroyed) publish("Runtime output stream closed");});}
     }
     public void stopRuntime() {
         if (stopping) return;
@@ -93,6 +103,7 @@ public final class HarnessService extends Service {
         });
     }
     @Override public void onDestroy() {
+        destroyed=true;
         listeners.clear();
         control.execute(() -> { try { RootRuntime.stop(this); } catch (IOException e) { /* Service death cannot confirm cleanup. */ } });
         control.shutdown();

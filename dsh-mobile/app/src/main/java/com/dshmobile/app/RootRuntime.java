@@ -1,6 +1,10 @@
 package com.dshmobile.app;
 
 import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.system.Os;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
@@ -16,6 +20,7 @@ import java.util.concurrent.TimeUnit;
 /** Explicit su-only runtime; no emulation, package installation or root fallback. */
 public final class RootRuntime {
     private static final Map<String, Process> JOBS = new LinkedHashMap<>();
+    private static final RuntimeAdmission ADMISSION = new RuntimeAdmission();
     private RootRuntime() {}
     public static File baseDir(Context c) { return new File(c.getFilesDir(), "mobile"); }
     public static File rootfsDir(Context c) { return new File(baseDir(c), "rootfs"); }
@@ -60,8 +65,38 @@ public final class RootRuntime {
     public static RootCapabilities probe(Context c) throws IOException {
         return new RootCapabilities(true, checked(c, Arrays.asList("probe"), 45));
     }
-    private static synchronized Process launch(Context c, List<String> command, File log) throws IOException {
+    private static void prepareResolver(Context c) throws IOException {
+        ConnectivityManager manager=c.getSystemService(ConnectivityManager.class);
+        if(manager==null) throw new IOException("Network service unavailable");
+        final LinkProperties properties;
+        try {
+            Network network=manager.getActiveNetwork();
+            if(network==null) throw new IOException("No active network; connect and restart runtime");
+            properties=manager.getLinkProperties(network);
+        } catch(SecurityException error) {throw new IOException("Active-network DNS permission unavailable",error);}
+        if(properties==null) throw new IOException("Active network DNS is unavailable");
+        byte[] bytes=RuntimeDnsPolicy.resolver(properties.getDnsServers()).getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        File temporary=File.createTempFile("resolver-",".tmp",baseDir(c));
+        IOException failure=null;
+        try {
+            try(java.io.FileOutputStream out=new java.io.FileOutputStream(temporary)) {out.write(bytes);out.getFD().sync();}
+            Os.chmod(temporary.getAbsolutePath(),0644);
+            Os.rename(temporary.getAbsolutePath(),new File(baseDir(c),"resolv.conf").getAbsolutePath());
+        } catch(android.system.ErrnoException error) {failure=new IOException("Cannot commit active-network resolver",error);throw failure;}
+        catch(IOException error) {failure=error;throw error;}
+        finally {
+            if(temporary.exists()&&!temporary.delete()) {
+                IOException cleanup=new IOException("Resolver staging cleanup failed");
+                if(failure!=null) failure.addSuppressed(cleanup); else throw cleanup;
+            }
+        }
+    }
+    private static Process launch(Context c, List<String> command, File log) throws IOException {
+        long ticket=ADMISSION.launchTicket();
+        synchronized(RootRuntime.class) {
+        ADMISSION.validate(ticket);
         if (!installed(c)) throw new IOException("Verified runtime is not installed");
+        prepareResolver(c);
         JOBS.entrySet().removeIf(entry -> !entry.getValue().isAlive());
         if(JOBS.isEmpty()) checked(c,Arrays.asList("check-state",new File(baseDir(c),"state").getAbsolutePath()),10);
         String id = UUID.randomUUID().toString();
@@ -69,15 +104,25 @@ public final class RootRuntime {
                 new File(baseDir(c), "data").getAbsolutePath(), new File(baseDir(c), "state").getAbsolutePath(), id, "--"));
         args.addAll(command);
         Process process = supervisor(c, args); JOBS.put(id, process);
+        try {
+            checked(c,Arrays.asList("control",new File(baseDir(c),"state").getAbsolutePath(),id,"ready"),10);
+        } catch(IOException error) {
+            try { cancel(c,process); } catch(IOException cleanup) {error.addSuppressed(cleanup);}
+            throw error;
+        }
         if (log != null) {
             Thread pump = new Thread(() -> {
                 try (InputStream in = process.getInputStream(); java.io.FileOutputStream out = new java.io.FileOutputStream(log, true)) {
                     byte[] bytes = new byte[4096]; int n; long total = 0;
                     while ((n=in.read(bytes))>=0) { if(total<1048576) out.write(bytes,0,(int)Math.min(n,1048576-total)); total+=n; }
-                } catch (IOException error) { process.destroy(); }
+                } catch (IOException error) {
+                    try { cancel(c,process); }
+                    catch(IOException cleanup) { /* Controller state retains unconfirmed cleanup for explicit recovery. */ }
+                }
             }, "runtime-log"); pump.setDaemon(true); pump.start();
         }
         return process;
+        }
     }
     public static Process exec(Context c, List<String> command, File log) throws IOException { return launch(c,command,log); }
     public static Process execPiped(Context c, List<String> command) throws IOException { return launch(c,command,null); }
@@ -102,13 +147,20 @@ public final class RootRuntime {
         if(failure!=null) throw failure;
     }
     public static void stop(Context c) throws IOException {
-        IOException first=null;
-        try { control(c,"stop"); } catch(IOException error) {first=error;}
-        if(installed(c)) {
-            try { checked(c,Arrays.asList("stop-all",new File(baseDir(c),"state").getAbsolutePath()),18); }
-            catch(IOException error) {if(first!=null) error.addSuppressed(first); throw error;}
+        ADMISSION.beginStop();
+        synchronized(RootRuntime.class) {
+            boolean confirmed=false;
+            try {
+                IOException first=null;
+                try { control(c,"stop"); } catch(IOException error) {first=error;}
+                if(new File(baseDir(c),"state").isDirectory()) {
+                    try { checked(c,Arrays.asList("stop-all",new File(baseDir(c),"state").getAbsolutePath()),18); }
+                    catch(IOException error) {if(first!=null) error.addSuppressed(first); throw error;}
+                }
+                if(first!=null) throw first;
+                confirmed=true;
+            } finally {ADMISSION.endStop(confirmed);}
         }
-        if(first!=null) throw first;
     }
     /** Stops one registered command without stopping the Web runtime or other jobs. */
     public static synchronized void cancel(Context c,Process process) throws IOException {

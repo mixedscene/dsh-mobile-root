@@ -41,6 +41,38 @@ static void require_enforcing(void) {
     }
     close(fd);
 }
+static void require_state(const char *state) {
+    struct stat st;
+    if(lstat(state,&st)||!S_ISDIR(st.st_mode)||st.st_uid!=0||(st.st_mode&0077)) {
+        errno=EPERM; fail("private root controller state");
+    }
+}
+static void parent_guard(pid_t controller) {
+    if(prctl(PR_SET_PDEATHSIG,SIGKILL,0,0,0)||getppid()!=controller) {
+        errno=ECHILD; fail("controller died during privilege transition");
+    }
+}
+static int retain_unresolved(const char *fifo,const char *state) {
+    char unresolved[PATH_MAX];
+    if(snprintf(unresolved,sizeof(unresolved),"%s.unresolved",fifo)>=(int)sizeof(unresolved)) {errno=ENAMETOOLONG;return -1;}
+    if(rename(fifo,unresolved)) return -1;
+    int fd=open(state,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+    if(fd<0) return -1;
+    int result=fsync(fd); int saved=errno; close(fd); errno=saved; return result;
+}
+static void bind_resolver(const char *root,const char *data) {
+    char source[PATH_MAX],target[PATH_MAX],descriptor[64];
+    path(source,data,"../resolv.conf"); path(target,root,"etc/resolv.conf");
+    int fd=open(source,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    if(fd<0) fail("open active-network resolver");
+    struct stat source_stat,target_stat;
+    if(fstat(fd,&source_stat)||!S_ISREG(source_stat.st_mode)||source_stat.st_size<=0||source_stat.st_size>4096
+            ||lstat(target,&target_stat)||!S_ISREG(target_stat.st_mode)) {errno=EINVAL;fail("resolver regular file required");}
+    snprintf(descriptor,sizeof(descriptor),"/proc/self/fd/%d",fd);
+    if(mount(descriptor,target,NULL,MS_BIND,NULL)
+            ||mount(NULL,target,NULL,MS_BIND|MS_REMOUNT|MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC,NULL)) fail("bind active-network resolver");
+    close(fd);
+}
 static void bind_dir(const char *source,const char *root,const char *dest) {
     char p[PATH_MAX]; path(p,root,dest);
     struct stat st;
@@ -48,7 +80,7 @@ static void bind_dir(const char *source,const char *root,const char *dest) {
     if (mount(source,p,NULL,MS_BIND|MS_REC,NULL)) fail("bind data");
     if (mount(NULL,p,NULL,MS_BIND|MS_REMOUNT|MS_NOSUID|MS_NODEV,NULL)) fail("secure data mount");
 }
-static void child_run(const char *root,const char *data,char **cmd) {
+static void child_run(const char *root,const char *data,char **cmd,pid_t controller) {
     if (setpgid(0,0)) fail("setpgid");
     if (unshare(CLONE_NEWNS)) fail("private mount namespace");
     if (mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL)) fail("private mounts");
@@ -69,6 +101,7 @@ static void child_run(const char *root,const char *data,char **cmd) {
     if(mount("devpts",p,"devpts",MS_NOSUID|MS_NOEXEC,"newinstance,ptmxmode=0666,mode=0620,gid=3003")) fail("private devpts");
     path(src,root,"dev/pts/ptmx"); path(p,root,"dev/ptmx");
     if(mount(src,p,NULL,MS_BIND,NULL)) fail("private ptmx");
+    bind_resolver(root,data);
     if (mount(NULL,root,NULL,MS_BIND|MS_REMOUNT|MS_RDONLY|MS_NOSUID|MS_NODEV,NULL)) fail("read-only root");
     if (chroot(root)||chdir("/home/dsh")) fail("chroot");
     for (int cap=0;cap<=CAP_LAST_CAP;cap++)
@@ -78,6 +111,8 @@ static void child_run(const char *root,const char *data,char **cmd) {
     struct __user_cap_header_struct h={_LINUX_CAPABILITY_VERSION_3,0};
     struct __user_cap_data_struct caps[2]={{0}};
     if (syscall(SYS_capset,&h,caps)||prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0)) fail("runtime capabilities");
+    /* Credential transitions clear PDEATHSIG; restore it only after all UID/GID changes. */
+    parent_guard(controller);
     clearenv();
     setenv("HOME","/home/dsh",1); setenv("DSH_HOME","/home/dsh/.dsh",1);
     setenv("PATH","/opt/node/bin:/usr/local/bin:/usr/bin:/bin",1);
@@ -113,6 +148,7 @@ static void kill_adopted_children(void) {
 }
 static int run(int argc,char **argv) {
     if (argc<8||strcmp(argv[6],"--")||!safe_id(argv[5])) return 2;
+    require_state(argv[4]);
     char fifo[PATH_MAX]; path(fifo,argv[4],argv[5]);
     if (mkfifo(fifo,0600)) fail("create job control");
     int fd=open(fifo,O_RDWR|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW);
@@ -123,12 +159,32 @@ static int run(int argc,char **argv) {
     action.sa_handler=signal_child; sigaction(SIGCHLD,&action,NULL);
     /* The root controller is outside the managed child's process group. */
     if (prctl(PR_SET_CHILD_SUBREAPER,1,0,0,0)) fail("subreaper");
+    /* Do not execute a short-lived command before Java has confirmed its control channel. */
+    int admitted=0; time_t admission_deadline=monotonic_seconds()+15;
+    while(!admitted&&!stopping) {
+        int timeout=(int)(admission_deadline-monotonic_seconds())*1000;
+        if(timeout<=0) break;
+        struct pollfd events[2]={{fd,POLLIN,0},{wakefds[0],POLLIN,0}};
+        int ready=poll(events,2,timeout);
+        if(ready<0&&errno!=EINTR) fail("launch admission poll");
+        if(ready>0&&(events[1].revents&POLLIN)) {char bytes[64];while(read(wakefds[0],bytes,sizeof(bytes))>0) {}}
+        if(ready>0&&(events[0].revents&POLLIN)) {
+            char bytes[64];ssize_t count=read(fd,bytes,sizeof(bytes));
+            for(ssize_t i=0;i<count;i++) {if(bytes[i]=='R') admitted=1;else if(bytes[i]=='S') stopping=1;}
+        }
+    }
+    if(!admitted||stopping) {
+        close(fd);close(wakefds[0]);close(wakefds[1]);
+        if(unlink(fifo)) {perror("remove unstarted controller state");return 79;}
+        fprintf(stderr,"Launch cancelled or readiness handshake timed out before creating a worker\n");return stopping?143:78;
+    }
+    pid_t controller=getpid();
     pid_t child=fork(); if (child<0) fail("fork");
     if (!child) {
         close(fd); close(wakefds[0]); close(wakefds[1]);
         signal(SIGTERM,SIG_DFL); signal(SIGINT,SIG_DFL); signal(SIGCHLD,SIG_DFL);
-        if(prctl(PR_SET_PDEATHSIG,SIGKILL,0,0,0)||getppid()==1) fail("controller died");
-        child_run(argv[2],argv[3],&argv[7]);
+        parent_guard(controller);
+        child_run(argv[2],argv[3],&argv[7],controller);
     }
     if(setpgid(child,child)&&errno!=EACCES&&errno!=ESRCH) fail("managed process group");
     int status=0,done=0; time_t deadline=0;
@@ -166,14 +222,14 @@ static int run(int argc,char **argv) {
         if(monotonic_seconds()>=reap_deadline) {remaining=1;break;}
         struct timespec delay={0,50000000}; nanosleep(&delay,NULL);
     }
-    close(fd); close(wakefds[0]); close(wakefds[1]); unlink(fifo);
     if(remaining) {
-        char unresolved[PATH_MAX];
-        if(snprintf(unresolved,sizeof(unresolved),"%s.unresolved",fifo)>=(int)sizeof(unresolved)) fail("state path");
-        int marker=open(unresolved,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
-        if(marker>=0) {const char *text="Escaped descendants; cleanup unknown. Manual recovery required.\n"; ssize_t ignored=write(marker,text,strlen(text));(void)ignored;close(marker);}
+        /* Rename preserves controller evidence atomically, including on a full filesystem. */
+        if(retain_unresolved(fifo,argv[4])) perror("retain unresolved controller FIFO");
+        close(fd); close(wakefds[0]); close(wakefds[1]);
         fprintf(stderr,"Unreaped descendants remain: escaped groups are not contained; cleanup UNKNOWN\n");return 79;
     }
+    close(fd); close(wakefds[0]); close(wakefds[1]);
+    if(unlink(fifo)) {perror("remove confirmed controller state");return 79;}
     return WIFEXITED(status)?WEXITSTATUS(status):128+WTERMSIG(status);
 }
 static void ownership(const char *p,uid_t uid,gid_t gid) {
@@ -208,6 +264,7 @@ static int install_root(const char *staging,const char *base) {
     close(fd); return 0;
 }
 static int state_control(const char *state,int stop_all) {
+    require_state(state);
     DIR *dir=opendir(state); if(!dir) fail("open runtime state");
     int found=0,unknown=0; struct dirent *entry;
     while((entry=readdir(dir))) {
@@ -278,9 +335,21 @@ int main(int argc,char **argv) {
     if(argc==3&&!strcmp(argv[1],"check-state")) return state_control(argv[2],0);
     if(argc==3&&!strcmp(argv[1],"stop-all")) return state_control(argv[2],1);
     if (argc==5&&!strcmp(argv[1],"control")&&safe_id(argv[3])) {
+        require_state(argv[2]);
         char p[PATH_MAX]; path(p,argv[2],argv[3]);
-        int fd=open(p,O_WRONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC);
+        int fd=-1; time_t deadline=monotonic_seconds()+3;
+        do {
+            fd=open(p,O_WRONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC);
+            if(fd>=0||strcmp(argv[4],"ready")||(errno!=ENOENT&&errno!=ENXIO)) break;
+            struct timespec delay={0,20000000}; nanosleep(&delay,NULL);
+        } while(monotonic_seconds()<deadline);
         if(fd<0) fail("open controller");
+        struct stat st;
+        if(fstat(fd,&st)||!S_ISFIFO(st.st_mode)||st.st_uid!=0||(st.st_mode&0077)) {errno=EPERM;fail("invalid controller FIFO");}
+        if(!strcmp(argv[4],"ready")) {
+            char ready='R';if(write(fd,&ready,1)!=1) fail("admit controlled launch");
+            close(fd);return 0;
+        }
         char op=!strcmp(argv[4],"stop")?'S':!strcmp(argv[4],"freeze")?'F':!strcmp(argv[4],"thaw")?'T':0;
         if(!op) return 2;
         if(write(fd,&op,1)!=1) fail("send control");

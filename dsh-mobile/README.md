@@ -9,7 +9,7 @@ DSH Root is a root-only Android shell for the Harness Web interface. It has a se
 - Tap **Start** to launch one foreground-service-owned runtime. Exit/failure requires a manual restart. The notification and Settings provide an explicit Stop action. No periodic health check or hidden repair installs run.
 - The WebView accepts exactly `http://127.0.0.1:3080`. It consumes the supported `dsh web` token URL printed by the server, without reading signing secrets or minting cookies. The URL/token are memory-only and excluded from diagnostics. External navigation and browser permission requests are blocked.
 - Settings exports at most 120 lifecycle messages, without runtime output, account tokens, provider keys or user conversation content. Native/Node process output is consumed rather than retained.
-- The private file exchange supports bounded SAF import/export and explicit deletion. It is not a complete root filesystem manager. Harness workspace files remain managed by the Web UI. Imported exchange files are not automatically attached to a conversation.
+- Runtime workspace files are managed through an unprivileged bundled Node helper, not direct Java reads of root-owned data. Select an existing workspace under `/home/dsh`, browse sorted pages of 100 entries, view/edit UTF-8 text up to 1 MiB, create files/folders, rename/move files or links without overwrite, and confirm deletion of entries themselves. Directory deletion requires an empty directory. SAF import/export copies actual content through bounded private staging files and runtime pipes (32 MiB limit), never by guessing URI paths. Imports are not automatically attached to conversations.
 - Screenshot captures one user-consented MediaProjection frame, displays a preview, and requires confirmation before SAF export. The image is never automatically uploaded. Attach the exported image manually through the Web file picker. Protected content may be blank.
 - The old pipe/TextView terminal, SSH server, broad storage permissions, injected DOM polling, public release key, self-signed browser cookies and overlay repair chain are removed. This app does not add a native PTY emulator. Only a working upstream Harness Web PTY can satisfy terminal use.
 
@@ -19,7 +19,7 @@ Authoritative Node/Agent/tool activity reporting is not yet connected. The servi
 
 The Git screen supports local status/branch, working/staged diff, one-file stage/unstage and an explicit reviewed commit using argv. It disables hooks, external diffs, signing, prompts, automatic maintenance and lazy fetch; global/system Git credentials are not loaded. Mutations refuse repositories with custom clean/smudge filters. No clone/fetch/push, automatic merge or worktree management is provided.
 
-The complete workspace file manager, safe host-root approval UI, native Antigravity broker/multiple accounts, mobile resource limits and full selected feature matrix remain incomplete. Build success is not a claim that these features work. Android 16, Android 17, 4KB/16KB, KernelSU and real API tests have not been completed on a phone.
+Directory moves, cross-filesystem moves, recursive deletion, large/binary preview, safe host-root approval UI, native Antigravity broker/multiple accounts, mobile resource limits and full selected feature matrix remain incomplete. Build success is not a claim that these features work. Android 16, Android 17, 4KB/16KB, KernelSU and real API tests have not been completed on a phone.
 
 ## Cloud build
 
@@ -27,7 +27,7 @@ The GitHub Actions workflow builds the runtime and ARM64 supervisor and copies i
 
 Cloud signing reads `DSH_KEYSTORE_PATH`, `DSH_KEYSTORE_PASSWORD`, `DSH_KEY_ALIAS` and `DSH_KEY_PASSWORD` from the build environment. Without them, release output is unsigned. A CI-generated test key must not be described as a permanent user release key, and reinstall/upgrade requires the same key or explicit data export and uninstall. The repository's old public keystore is never used.
 
-Cloud checks include `:app:testReleaseUnitTest`, `:app:lintRelease` and `:app:assembleRelease` as selected by the workflow. `WebOriginTest` rejects external origins, userinfo, alternate loopback names and ports. `GitCommandsTest` checks argv handling and path rejection. Installer tests cover archive policy separately. No Android environment or dependency downloads are needed on the local computer.
+Cloud checks include `:app:testReleaseUnitTest`, `:app:lintRelease` and `:app:assembleRelease` as selected by the workflow. `WebOriginTest` rejects external origins, userinfo, alternate loopback names and ports. `GitCommandsTest` checks argv handling and path rejection. Linux Node tests run `node --test dsh-mobile/tools/workspace-ops.test.mjs` for workspace pagination, stale writes, links/traversal, no-overwrite transfers and an ancestor-directory replacement race. These `/proc/self/fd` tests deliberately skip on non-Linux hosts. Installer tests cover archive policy separately. No Android environment or dependency downloads are needed on the local computer.
 
 ## Device smoke (user performed)
 
@@ -37,3 +37,11 @@ Cloud checks include `:app:testReleaseUnitTest`, `:app:lintRelease` and `:app:as
 4. Try a file import/export, and capture a screenshot, preview it, export it, then manually attach the exported image.
 5. Stop the runtime from the notification and check for leftover processes/mounts. Do not assume the signal-group fallback catches escaped children.
 6. Record Android build, kernel, KernelSU configuration and page size. Background completion and automatic idle freezing are not accepted until their missing activity integration is implemented and tested.
+
+## Workspace concurrency limits
+
+Every workspace request opens and holds each ancestor using `O_DIRECTORY | O_NOFOLLOW`, then addresses children through its `/proc/self/fd` directory handle. Final file reads also use `O_NOFOLLOW`, regular-file checks, a bounded read and before/after stat checks. A replaced directory name cannot redirect an already-held directory handle into a symlink target. This is not a host-root bridge or a sandbox against other code already running with the runtime UID.
+
+Text writes use a preview fingerprint (device/inode/size/nanosecond timestamps/mode and SHA-256), a cooperative exclusive lock, a same-directory temporary file, fsync, a repeated version check and atomic rename. External writers that ignore the helper lock can still race between the final check and rename; Node's APIs do not supply an atomic conditional inode/version replacement. Do not represent this as a race-free compare-and-swap editor. Reopen after a reported conflict and avoid simultaneous terminal edits of the same file.
+
+File/link moves use no-overwrite hard-link publication followed by source removal, so they require the same filesystem and are not an atomic two-name rename. An interruption can leave both names; inspect the directory before retrying. Directory moves are refused rather than using a potentially overwriting rename. Entries are not recursively deleted, directory listings are limited to 10000 entries, and protected helper lock/temp names are hidden. No operation automatically retries after an unknown outcome.

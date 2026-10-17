@@ -5,6 +5,7 @@ import android.system.Os;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -28,12 +29,20 @@ public final class RuntimeInstaller {
 
     public static boolean isInstalled(Context c) {
         File root = RootRuntime.rootfsDir(c);
-        return new File(root,".runtime-verified.json").isFile()
+        boolean files = new File(root,".runtime-verified.json").isFile()
                 && new File(root,"opt/dsh-mobile/start-mobile.sh").isFile()
                 && new File(root,"usr/local/bin/node").isFile();
+        if(!files) return false;
+        try(InputStream in=new FileInputStream(new File(root,".runtime-verified.json"))) {
+            RuntimeArchivePolicy.manifest(manifest(c),readManifest(in));
+            return true;
+        } catch(IOException error) {return false;}
     }
     private static byte[] manifest(Context c) throws IOException {
-        try (InputStream in=c.getAssets().open("runtime/runtime-manifest.json"); ByteArrayOutputStream out=new ByteArrayOutputStream()) {
+        try (InputStream in=c.getAssets().open("runtime/runtime-manifest.json")) {return readManifest(in);}
+    }
+    private static byte[] readManifest(InputStream in) throws IOException {
+        try(ByteArrayOutputStream out=new ByteArrayOutputStream()) {
             byte[] bytes=new byte[4096]; int n;
             while((n=in.read(bytes))>=0) {
                 if(out.size()+n>65536) throw new IOException("Runtime manifest exceeds limit");
@@ -115,7 +124,7 @@ public final class RuntimeInstaller {
                     catch(android.system.ErrnoException error) { throw new IOException("Cannot set runtime mode",error); }
                 }
             }
-            for(String required:Arrays.asList("usr/local/bin/node","opt/dsh-mobile/start-mobile.sh","bin/bash","usr/local/bin/git","usr/bin/rg"))
+            for(String required:Arrays.asList("usr/local/bin/node","opt/dsh-mobile/start-mobile.sh","bin/bash","usr/local/bin/git","usr/bin/rg","etc/resolv.conf"))
                 if(!new File(stage,required).isFile()) throw new IOException("Runtime missing "+required);
             for(String dir:Arrays.asList("home/dsh","tmp","proc","dev/pts")) mkdir(new File(stage,dir));
             for(String device:Arrays.asList("null","zero","random","urandom","tty","ptmx")) {
