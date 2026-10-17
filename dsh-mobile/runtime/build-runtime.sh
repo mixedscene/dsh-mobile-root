@@ -113,11 +113,14 @@ CHROOT
 PYTHONDONTWRITEBYTECODE=1 python3 "$source_dir/dsh-mobile/runtime/runtime-docs.py" cleanup "$root"
 cp "$root/opt/dsh-mobile/licenses/dangling-optional-docs.json" "$out/runtime-doc-cleanup.json"
 cp "$root/opt/dsh-mobile/licenses/dangling-optional-docs.json" "$out/runtime-doc-cleanup.txt"
+PYTHONDONTWRITEBYTECODE=1 python3 "$source_dir/dsh-mobile/runtime/runtime-docs.py" trim "$root"
+cp "$root/opt/dsh-mobile/licenses/optional-resource-trim.json" "$out/runtime-resource-trim.txt"
+test -d "$root/usr/lib/locale/C.utf8"
 for ((i=${#mounted[@]}-1; i>=0; i--)); do umount -R "${mounted[$i]}"; done
 mounted=()
 # Device nodes are created only by the native supervisor's bind mounts.
 find "$root/dev" -mindepth 1 -delete
-mkdir -p "$root/dev/pts" "$root/run"
+mkdir -p "$root/dev/pts" "$root/run/lock"
 for device in null zero random urandom ptmx tty; do touch "$root/dev/$device"; done
 find "$root" -xdev \( -type b -o -type c -o -type p -o -type s \) -delete
 rm -f "$root/etc/mtab"
@@ -140,7 +143,7 @@ for target in dev proc sys; do
   mounted+=("$verified/$target")
 done
 chroot --userspec=65534:65534 --groups=3003 "$verified" /usr/bin/env -i \
-  HOME=/home/dsh DSH_HOME=/home/dsh/.dsh TMPDIR=/tmp PATH=/usr/local/bin:/usr/bin:/bin \
+  HOME=/home/dsh DSH_HOME=/home/dsh/.dsh TMPDIR=/tmp PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
   DSH_TELEMETRY_DISABLED=1 DSH_TOOLS_MODE=native \
   /usr/local/bin/node /opt/dsh-mobile/smoke.mjs
 for ((i=${#mounted[@]}-1; i>=0; i--)); do umount -R "${mounted[$i]}"; done

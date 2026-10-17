@@ -106,6 +106,62 @@ class DocumentationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "logical path usr/bin/broken"):
                 docs.packer.pack(root, root.parent / "out", "test")
 
+    def test_optional_resource_trim_preserves_runtime_utf8_zoneinfo_and_licenses(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime, build = self.prepare(root)
+            (runtime / "copyright").write_text("Ubuntu license")
+            retained = ["usr/lib/locale/C.utf8/LC_CTYPE", "usr/share/zoneinfo/UTC", "usr/bin/node", "opt/dsh-mobile/install/node_modules/ui/locale/zh.json", "usr/share/common-licenses/GPL-3"]
+            for logical in retained:
+                path = root / logical
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("retained")
+            for logical in ["usr/share/locale", "usr/share/man", "usr/share/info"]:
+                path = root / logical
+                path.mkdir(parents=True, exist_ok=True)
+                (path / "optional-resource").write_text("optional")
+            (root / "usr/share/locale/LICENSE").write_text("license retained as inventory")
+            self.link(root / "usr/share/locale/broken.mo", "missing-catalog")
+            report = docs.trim_optional_resources(root)
+            self.assertEqual(len(report["removedPaths"]), 3)
+            self.assertTrue(all(not (root / logical).exists() for logical in report["removedPaths"]))
+            self.assertTrue(all((root / logical).read_text() == "retained" for logical in retained))
+            self.assertEqual((runtime / "copyright").read_text(), "Ubuntu license")
+            self.assertEqual(len(report["preservedLicenseFiles"]), 1)
+            self.assertEqual((root / report["preservedLicenseFiles"][0]["snapshot"]).read_text(), "license retained as inventory")
+
+    def test_optional_resource_directory_alias_is_unlinked_not_followed_for_deletion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime, build = self.prepare(root)
+            locale = root / "usr/lib/locale/C.utf8"
+            locale.mkdir(parents=True)
+            (locale / "LC_CTYPE").write_text("C UTF8")
+            self.link(root / "usr/share/locale", "/usr/lib/locale/C.utf8", directory=True)
+            docs.trim_optional_resources(root)
+            self.assertFalse((root / "usr/share/locale").is_symlink())
+            self.assertEqual((locale / "LC_CTYPE").read_text(), "C UTF8")
+
+    def test_manual_slave_alternative_is_removed_but_binary_alternative_is_retained(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.prepare(root)
+            alternatives = root / "etc/alternatives"
+            alternatives.mkdir(parents=True)
+            binary = root / "usr/bin/gawk"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("runtime binary")
+            manual = root / "usr/share/man/man1/gawk.1.gz"
+            manual.parent.mkdir(parents=True)
+            manual.write_text("optional manual")
+            self.link(alternatives / "awk", "/usr/bin/gawk")
+            self.link(alternatives / "awk.1.gz", "/usr/share/man/man1/gawk.1.gz")
+            report = docs.trim_optional_resources(root)
+            self.assertTrue((alternatives / "awk").is_symlink())
+            self.assertEqual(binary.read_text(), "runtime binary")
+            self.assertFalse((alternatives / "awk.1.gz").is_symlink())
+            self.assertEqual(report["removedManualAliases"], [{"path": "etc/alternatives/awk.1.gz", "target": "/usr/share/man/man1/gawk.1.gz"}])
+
 
 if __name__ == "__main__":
     unittest.main()

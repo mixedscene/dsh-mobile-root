@@ -3,8 +3,10 @@ import hashlib
 import importlib.util
 import json
 import os
+import posixpath
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import sys
 import tempfile
@@ -138,5 +140,46 @@ def cleanup(root):
     return report
 
 
+def trim_optional_resources(root):
+    """Remove only system translation catalogs/man/info, keeping any license-shaped files."""
+    root = root.resolve(strict=True)
+    report = {"removedPaths": [], "preservedLicenseFiles": [], "removedManualAliases": []}
+    for logical in ["usr/share/locale", "usr/share/man", "usr/share/info"]:
+        parent = packer.resolve_confined(root, str(PurePosixPath(logical).parent))
+        leaf = parent / PurePosixPath(logical).name
+        if not leaf.exists() and not leaf.is_symlink():
+            continue
+        for document, resolved in walk(root, logical):
+            if not PROTECTED.match(PurePosixPath(document).name):
+                continue
+            if resolved is None or not resolved.is_file():
+                raise ValueError(f"missing license in optional resource tree: {document}")
+            content = resolved.read_bytes()
+            snapshot = root / LICENSES / "trimmed-resource-licenses" / document
+            snapshot.parent.mkdir(parents=True, exist_ok=True)
+            snapshot.write_bytes(content)
+            report["preservedLicenseFiles"].append({"path": document, "snapshot": snapshot.relative_to(root).as_posix(), "sha256": hashlib.sha256(content).hexdigest()})
+        if leaf.is_symlink():
+            leaf.unlink()
+        elif leaf.is_dir():
+            shutil.rmtree(leaf)
+        else:
+            raise ValueError(f"unexpected optional resource type: {logical}")
+        report["removedPaths"].append(logical)
+    alternatives = root / "etc/alternatives"
+    if alternatives.is_dir() and not alternatives.is_symlink():
+        for leaf in sorted(alternatives.iterdir()):
+            if not leaf.is_symlink() or not re.search(r"\.[1-9][a-z]*(?:\.(?:gz|xz|bz2))?$", leaf.name, re.I) or PROTECTED.match(leaf.name):
+                continue
+            target = os.readlink(leaf)
+            normalized = posixpath.normpath(posixpath.join("/etc/alternatives", target))
+            if not normalized.startswith("/usr/share/man/"):
+                continue
+            report["removedManualAliases"].append({"path": leaf.relative_to(root).as_posix(), "target": target})
+            leaf.unlink()
+    (root / LICENSES / "optional-resource-trim.json").write_text(json.dumps(report, indent=2) + "\n")
+    return report
+
+
 if __name__ == "__main__":
-    {"preserve": preserve, "cleanup": cleanup}[sys.argv[1]](Path(sys.argv[2]))
+    {"preserve": preserve, "cleanup": cleanup, "trim": trim_optional_resources}[sys.argv[1]](Path(sys.argv[2]))

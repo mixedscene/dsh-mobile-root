@@ -143,6 +143,7 @@ static void child_run(const char *root,const char *data,char **cmd,pid_t control
     setenv("HOME","/home/dsh",1); setenv("DSH_HOME","/home/dsh/.dsh",1);
     setenv("PATH","/opt/node/bin:/usr/local/bin:/usr/bin:/bin",1);
     setenv("TERM","xterm-256color",1); setenv("TMPDIR","/tmp",1);
+    setenv("LANG","C.UTF-8",1);
     setenv("DSH_TELEMETRY_DISABLED","1",1);
     execvp(cmd[0],cmd); fail("exec runtime");
 }

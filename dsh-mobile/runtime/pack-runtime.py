@@ -36,10 +36,38 @@ def resolve_confined(root, relative):
     return root.joinpath(*parts)
 
 
+def audit_symlinks(root):
+    """Report every physical invalid link without following directory aliases outside the image."""
+    root = root.resolve(strict=True)
+    invalid = []
+    for directory, directories, files in os.walk(root, followlinks=False):
+        for name in sorted(directories + files):
+            link = Path(directory) / name
+            if not link.is_symlink():
+                continue
+            logical = link.relative_to(root).as_posix()
+            target = os.readlink(link)
+            try:
+                resolved = resolve_confined(root, logical)
+                metadata = resolved.stat()
+                if stat.S_ISDIR(metadata.st_mode) and (resolved == link.parent or resolved in link.parent.parents):
+                    raise ValueError("directory alias points at an ancestor")
+            except (OSError, ValueError) as error:
+                invalid.append({"path": logical, "target": target, "error": str(error)})
+    return sorted(invalid, key=lambda item: item["path"])
+
+
 def pack(root, output, build_id):
     """Flatten symbolic links and deduplicate physical files into safe backward hardlinks."""
     root = root.resolve(strict=True)
     output.mkdir(parents=True, exist_ok=True)
+    invalid = audit_symlinks(root)
+    report = {"scope": "rootfs", "invalidLinks": invalid}
+    (output / "runtime-symlink-audit.json").write_text(json.dumps(report, indent=2) + "\n")
+    (output / "runtime-symlink-audit.txt").write_text(json.dumps(report, indent=2) + "\n")
+    if invalid:
+        details = "\n".join(f"logical path {item['path']} -> {item['target']}: {item['error']}" for item in invalid)
+        raise ValueError(f"rootfs symlink audit found {len(invalid)} invalid links:\n{details}")
     archive = output / "runtime.tar.gz"
     total = 0
     files = 0

@@ -97,6 +97,25 @@ class ArchiveTests(unittest.TestCase):
                 self.assertEqual(alias.linkname, "a-file")
                 self.assertFalse(any(entry.issym() for entry in archive))
 
+    def test_audit_reports_all_invalid_links_before_archive_creation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            root.mkdir()
+            try:
+                (root / "broken-a").symlink_to("missing-a")
+                (root / "broken-b").symlink_to("/missing-b")
+                (root / "escape").symlink_to("../outside")
+            except OSError as error:
+                self.skipTest(f"host cannot create symlinks: {error}")
+            output = Path(temporary) / "out"
+            with self.assertRaises(ValueError) as failure:
+                packer.pack(root, output, "audit")
+            for name in ["broken-a", "broken-b", "escape"]:
+                self.assertIn(name, str(failure.exception))
+            report = json.loads((output / "runtime-symlink-audit.json").read_text())
+            self.assertEqual(len(report["invalidLinks"]), 3)
+            self.assertFalse((output / "runtime.tar.gz").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
