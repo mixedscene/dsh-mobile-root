@@ -9,9 +9,12 @@ import java.util.Set;
 
 /** Produces only numeric nameserver directives from Android's active-network addresses. */
 final class RuntimeDnsPolicy {
+    static final String OFFLINE_STATUS="Offline/no DNS; network calls unavailable, restart after connecting";
+    static final String OFFLINE_RESOLVER="# Offline/no DNS: no configured upstream; reconnect and restart runtime.\noptions timeout:1 attempts:1\n";
     private RuntimeDnsPolicy() {}
     static String resolver(List<InetAddress> addresses) throws IOException {
-        if(addresses==null||addresses.isEmpty()) throw new IOException("Active network has no DNS servers; reconnect and restart runtime");
+        if(addresses==null) throw new IOException("Active network returned an invalid DNS list");
+        if(addresses.isEmpty()) return OFFLINE_RESOLVER;
         Set<String> servers=new LinkedHashSet<>();
         for(InetAddress address:addresses) {
             if(address==null||address.isAnyLocalAddress()||address.isMulticastAddress()) throw new IOException("Active network returned an invalid DNS address");

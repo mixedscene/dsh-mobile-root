@@ -2,6 +2,7 @@ package com.dshmobile.app;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Set;
 
 /** Pure archive validation shared by the installer and its host-side unit tests. */
 final class RuntimeArchivePolicy {
@@ -18,8 +19,19 @@ final class RuntimeArchivePolicy {
         return name;
     }
     static void entry(boolean regular, boolean directory, boolean link, boolean sparse, long size, long total, long max) throws IOException {
-        if((!regular&&!directory)||link||sparse) throw new IOException("Archive links/devices/sparse files are forbidden");
+        entry(regular,directory,false,link,sparse,size,total,max);
+    }
+    static void entry(boolean regular,boolean directory,boolean hardLink,boolean symbolicLink,boolean sparse,long size,long total,long max) throws IOException {
+        if((!regular&&!directory&&!hardLink)||symbolicLink||sparse) throw new IOException("Archive symlinks/devices/sparse files are forbidden");
+        if((hardLink||directory)&&size!=0) throw new IOException("Hard-link and directory entries must have no payload");
         if(size<0||size>max-total||total<0||total>max) throw new IOException("Expanded runtime exceeds limit");
+    }
+    static String hardLinkTarget(String raw,String destination,Set<String> seenRegular) throws IOException {
+        String source=name(raw,false);
+        for(String component:source.split("/",-1))
+            if(component.isEmpty()||component.equals(".")) throw new IOException("Hard-link target must be a normal relative file path");
+        if(source.equals(destination)||!seenRegular.contains(source)) throw new IOException("Hard link must refer to an earlier extracted regular file, never a directory/link/self/forward target");
+        return source;
     }
     static void hash(String expected,String actual) throws IOException {
         if(!expected.matches("[0-9a-f]{64}")||!expected.equals(actual)) throw new IOException("Runtime archive hash mismatch");

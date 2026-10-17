@@ -18,6 +18,7 @@ public final class HarnessService extends Service {
     private final Set<Runnable> listeners = new HashSet<>();
     private final ArrayDeque<String> logs = new ArrayDeque<>();
     private volatile String state = "Stopped", launchUrl;
+    private volatile String dnsStatus = "DNS not prepared";
     private volatile boolean starting, stopping;
     private volatile boolean destroyed;
     private volatile Process process;
@@ -60,7 +61,8 @@ public final class HarnessService extends Service {
             try {
                 if (!RootRuntime.installed(this)) throw new IOException("Runtime not installed");
                 process = RootRuntime.startWeb(this, 3080);
-                publish("Running; task activity unknown; automatic freeze disabled");
+                dnsStatus=RootRuntime.resolverStatus();
+                publish("Running; task activity unknown; automatic freeze disabled; "+dnsStatus);
                 Process owned = process;
                 Thread reader = new Thread(() -> readOutput(owned), "runtime-output");
                 reader.start();
@@ -83,7 +85,7 @@ public final class HarnessService extends Service {
                         String candidate=match.group(1);
                         main.post(() -> {
                             if(process==owned&&!stopping&&!destroyed) {
-                                launchUrl=candidate; publish("Web UI ready. Task activity unknown; automatic freeze disabled");
+                                launchUrl=candidate; publish("Web UI ready. Task activity unknown; automatic freeze disabled; "+dnsStatus);
                             }
                         });
                     } }

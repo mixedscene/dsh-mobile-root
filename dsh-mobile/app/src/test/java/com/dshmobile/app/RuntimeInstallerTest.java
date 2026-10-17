@@ -7,6 +7,19 @@ import static org.junit.Assert.assertThrows;
 
 /** Exercises the same pure validation used before each extracted file is opened. */
 public final class RuntimeInstallerTest {
+    @Test public void allowsOnlyBackwardHardLinksToActualRegularFiles() throws Exception {
+        java.util.Set<String> regular=new java.util.HashSet<>();regular.add("usr/bin/git");
+        assertEquals("usr/bin/git",RuntimeArchivePolicy.hardLinkTarget("./usr/bin/git","usr/bin/git-upload-pack",regular));
+        RuntimeArchivePolicy.entry(false,false,true,false,false,0,100,100);
+        for(String target:new String[]{"usr/bin/future","usr/bin","usr/bin/git-upload-pack","usr/bin/self","../outside","/usr/bin/git","usr//bin/git","usr/./bin/git","usr/bin/git/","bad\\file","bad\0file"})
+            assertThrows(IOException.class,()->RuntimeArchivePolicy.hardLinkTarget(target,"usr/bin/self",regular));
+        assertThrows(IOException.class,()->RuntimeArchivePolicy.hardLinkTarget("usr/bin/git","usr/bin/git",regular));
+    }
+    @Test public void rejectsHardLinkPayloadAndRetainsExpansionLimit() {
+        assertThrows(IOException.class,()->RuntimeArchivePolicy.entry(false,false,true,false,false,1,0,100));
+        assertThrows(IOException.class,()->RuntimeArchivePolicy.entry(false,false,true,false,false,0,101,100));
+        assertThrows(IOException.class,()->RuntimeArchivePolicy.entry(false,false,true,true,false,0,0,100));
+    }
     @Test public void installedManifestMustMatchBundledBuildExactly() throws Exception {
         byte[] original="build-id-original sha256-original".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         RuntimeArchivePolicy.manifest(original,original.clone());

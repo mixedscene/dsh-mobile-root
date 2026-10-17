@@ -52,6 +52,32 @@ static void parent_guard(pid_t controller) {
         errno=ECHILD; fail("controller died during privilege transition");
     }
 }
+static int owner_pidfd(pid_t owner,const char *data) {
+#if defined(SYS_pidfd_open)
+    int fd=(int)syscall(SYS_pidfd_open,owner,0);
+    if(fd<0) fail("APK owner pidfd unavailable; runtime unsupported");
+    char parent[PATH_MAX],status_path[128];path(parent,data,"..");
+    struct stat base;
+    if(lstat(parent,&base)||!S_ISDIR(base.st_mode)) fail("APK-owned runtime base");
+    snprintf(status_path,sizeof(status_path),"/proc/%ld/status",(long)owner);
+    FILE *status=fopen(status_path,"r");if(!status) fail("APK owner UID evidence");
+    unsigned long real=0,effective=0,saved=0,fs=0;int matched=0;char line[512];
+    while(fgets(line,sizeof(line),status)) {
+        if(sscanf(line,"Uid: %lu %lu %lu %lu",&real,&effective,&saved,&fs)==4) {
+            matched=real==(unsigned long)base.st_uid&&effective==real&&saved==real&&fs==real;
+            break;
+        }
+    }
+    fclose(status);
+    /* An already-dead pidfd also rejects PID reuse between pidfd_open and proc inspection. */
+    struct pollfd event={fd,POLLIN,0};
+    if(!matched||poll(&event,1,0)!=0) {errno=EPERM;fail("APK owner identity changed or exited");}
+    return fd;
+#else
+    (void)owner;(void)data;
+    errno=ENOSYS;fail("APK owner pidfd unavailable; runtime unsupported");return -1;
+#endif
+}
 static int retain_unresolved(const char *fifo,const char *state) {
     char unresolved[PATH_MAX];
     if(snprintf(unresolved,sizeof(unresolved),"%s.unresolved",fifo)>=(int)sizeof(unresolved)) {errno=ENAMETOOLONG;return -1;}
@@ -121,6 +147,11 @@ static void child_run(const char *root,const char *data,char **cmd,pid_t control
     execvp(cmd[0],cmd); fail("exec runtime");
 }
 static volatile sig_atomic_t stopping;
+static void observe_owner(int *fd,short events) {
+    if(*fd>=0&&(events&(POLLIN|POLLHUP|POLLERR|POLLNVAL))) {
+        close(*fd);*fd=-1;stopping=1;
+    }
+}
 static int wakefds[2]={-1,-1};
 static void wake_controller(void) {
     int saved=errno;
@@ -146,9 +177,28 @@ static void kill_adopted_children(void) {
     }
     fclose(children);
 }
+static int reap_managed(pid_t child,int *status) {
+    /* The main PID is still unreaped until group signalling completes. */
+    kill(-child,SIGCONT); kill(-child,SIGKILL);
+    pid_t reaped=waitpid(child,status,WNOHANG);
+    if(reaped<0&&errno!=EINTR) fail("reap main child");
+    time_t deadline=monotonic_seconds()+3;
+    for(;;) {
+        kill_adopted_children();
+        int adopted_status=0;pid_t adopted=waitpid(-1,&adopted_status,WNOHANG);
+        if(adopted>0) {if(adopted==child) *status=adopted_status;continue;}
+        if(adopted<0&&errno==ECHILD) return 0;
+        if(adopted<0&&errno!=EINTR) fail("reap descendants");
+        if(monotonic_seconds()>=deadline) return 1;
+        struct timespec delay={0,50000000};nanosleep(&delay,NULL);
+    }
+}
 static int run(int argc,char **argv) {
-    if (argc<8||strcmp(argv[6],"--")||!safe_id(argv[5])) return 2;
+    if (argc<9||strcmp(argv[7],"--")||!safe_id(argv[5])) return 2;
+    char *end=NULL;errno=0;long owner=strtol(argv[6],&end,10);
+    if(errno||!end||*end||owner<=1||owner>INT_MAX) return 2;
     require_state(argv[4]);
+    int owner_fd=owner_pidfd((pid_t)owner,argv[3]);
     char fifo[PATH_MAX]; path(fifo,argv[4],argv[5]);
     if (mkfifo(fifo,0600)) fail("create job control");
     int fd=open(fifo,O_RDWR|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW);
@@ -164,9 +214,10 @@ static int run(int argc,char **argv) {
     while(!admitted&&!stopping) {
         int timeout=(int)(admission_deadline-monotonic_seconds())*1000;
         if(timeout<=0) break;
-        struct pollfd events[2]={{fd,POLLIN,0},{wakefds[0],POLLIN,0}};
-        int ready=poll(events,2,timeout);
+        struct pollfd events[3]={{fd,POLLIN,0},{wakefds[0],POLLIN,0},{owner_fd,POLLIN,0}};
+        int ready=poll(events,3,timeout);
         if(ready<0&&errno!=EINTR) fail("launch admission poll");
+        if(ready>0) observe_owner(&owner_fd,events[2].revents);
         if(ready>0&&(events[1].revents&POLLIN)) {char bytes[64];while(read(wakefds[0],bytes,sizeof(bytes))>0) {}}
         if(ready>0&&(events[0].revents&POLLIN)) {
             char bytes[64];ssize_t count=read(fd,bytes,sizeof(bytes));
@@ -174,6 +225,7 @@ static int run(int argc,char **argv) {
         }
     }
     if(!admitted||stopping) {
+        if(owner_fd>=0) close(owner_fd);
         close(fd);close(wakefds[0]);close(wakefds[1]);
         if(unlink(fifo)) {perror("remove unstarted controller state");return 79;}
         fprintf(stderr,"Launch cancelled or readiness handshake timed out before creating a worker\n");return stopping?143:78;
@@ -181,10 +233,11 @@ static int run(int argc,char **argv) {
     pid_t controller=getpid();
     pid_t child=fork(); if (child<0) fail("fork");
     if (!child) {
+        if(owner_fd>=0) close(owner_fd);
         close(fd); close(wakefds[0]); close(wakefds[1]);
         signal(SIGTERM,SIG_DFL); signal(SIGINT,SIG_DFL); signal(SIGCHLD,SIG_DFL);
         parent_guard(controller);
-        child_run(argv[2],argv[3],&argv[7],controller);
+        child_run(argv[2],argv[3],&argv[8],controller);
     }
     if(setpgid(child,child)&&errno!=EACCES&&errno!=ESRCH) fail("managed process group");
     int status=0,done=0; time_t deadline=0;
@@ -195,9 +248,10 @@ static int run(int argc,char **argv) {
         if (stopping&&!deadline) { kill(-child,SIGCONT); kill(-child,SIGTERM); deadline=monotonic_seconds()+5; }
         if (deadline&&monotonic_seconds()>=deadline) kill(-child,SIGKILL);
         if (deadline&&monotonic_seconds()>=deadline+2) break;
-        struct pollfd event[2]={{fd,POLLIN,0},{wakefds[0],POLLIN,0}};
-        int ready=poll(event,2,deadline?100:-1);
+        struct pollfd event[3]={{fd,POLLIN,0},{wakefds[0],POLLIN,0},{owner_fd,POLLIN,0}};
+        int ready=poll(event,3,deadline?100:-1);
         if (ready<0&&errno!=EINTR) fail("control poll");
+        if(ready>0) observe_owner(&owner_fd,event[2].revents);
         if (ready>0&&(event[1].revents&POLLIN)) {char bytes[64]; while(read(wakefds[0],bytes,sizeof(bytes))>0) {}}
         if (ready>0&&(event[0].revents&POLLIN)) { char bytes[64]; ssize_t n=read(fd,bytes,sizeof(bytes));
             for (ssize_t i=0;i<n;i++) {
@@ -207,21 +261,8 @@ static int run(int argc,char **argv) {
             }
         }
     }
-    /* Keep the main PID unreaped until group cleanup, so it cannot be reused. */
-    kill(-child,SIGCONT); kill(-child,SIGKILL);
-    pid_t reaped=waitpid(child,&status,WNOHANG);
-    if(reaped<0&&errno!=EINTR) fail("reap main child");
-    time_t reap_deadline=monotonic_seconds()+3;
-    int remaining=0;
-    for(;;) {
-        kill_adopted_children();
-        int adopted_status=0; pid_t adopted=waitpid(-1,&adopted_status,WNOHANG);
-        if(adopted>0) {if(adopted==child) status=adopted_status;continue;}
-        if(adopted<0&&errno==ECHILD) {remaining=0;break;}
-        if(adopted<0&&errno!=EINTR) fail("reap descendants");
-        if(monotonic_seconds()>=reap_deadline) {remaining=1;break;}
-        struct timespec delay={0,50000000}; nanosleep(&delay,NULL);
-    }
+    if(owner_fd>=0) close(owner_fd);
+    int remaining=reap_managed(child,&status);
     if(remaining) {
         /* Rename preserves controller evidence atomically, including on a full filesystem. */
         if(retain_unresolved(fifo,argv[4])) perror("retain unresolved controller FIFO");
@@ -328,7 +369,7 @@ int main(int argc,char **argv) {
         return 0;
     }
     if (argc>1&&!strcmp(argv[1],"run")) {
-        if(argc<8) return 2;
+        if(argc<9) return 2;
         require_enforcing(); return run(argc,argv);
     }
     if (argc==4&&!strcmp(argv[1],"install")) {require_enforcing(); return install_root(argv[2],argv[3]);}

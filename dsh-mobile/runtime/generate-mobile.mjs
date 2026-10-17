@@ -30,12 +30,13 @@ const excluded = new Set([
   'schedule', 'tool-schedule', 'ui-schedule', 'ptc-runtime', 'workflow-ptc', 'tool-workflow', 'ui-workflow-run',
   'mcp-resources', 'office-to-pdf', 'ui-sidebar-documentpreview', 'ui-sidebar-browser',
   'open-in-app', 'ui-open-in-app', 'cordis-host-runner', 'cordis-client-runner', 'cordis-inspect-providers', 'ui-cordis',
-  'tool-pwsh', 'pwsh-sandbox', 'web-search-deepseek',
+  'tool-pwsh', 'pwsh-sandbox',
 ])
 for (const id of excluded) rows.delete(id)
 rows.get('session-query-sqlite').config = { path: new Expression("dshHomePath('query', 'sessions.sqlite')"), openAt: 'first-search' }
 rows.get('agent-preset-registry').config = { default: 'mobile' }
 rows.get('subagent').config = { maxActiveSubagents: 2, maxDepth: 1 }
+rows.get('web-search-deepseek').config = { apiKeyEnv: 'DSH_SEARCH_API_KEY' }
 const preset = load('packages/bundle/web-app/presets/standard.patch.yml')[0].insert[0]
 preset.id = 'preset-mobile'
 preset.config.id = 'mobile'

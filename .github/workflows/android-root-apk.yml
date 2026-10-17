@@ -96,6 +96,12 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/27.2.12479018/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release
           cmake --build "$RUNNER_TEMP/supervisor-build" --parallel 2
+          readelf -lW "$RUNNER_TEMP/supervisor-build/libmobile_supervisor.so" > "$RUNNER_TEMP/supervisor-elf.txt"
+          python3 - "$RUNNER_TEMP/supervisor-elf.txt" <<'PY'
+          import pathlib, sys
+          loads = [line.split() for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip().startswith('LOAD ')]
+          assert loads and all(int(row[-1], 16) >= 16384 for row in loads), 'Supervisor ELF must support 16 KiB alignment'
+          PY
           mkdir -p dsh-mobile/app/src/main/jniLibs/arm64-v8a
           cp "$RUNNER_TEMP/supervisor-build/libmobile_supervisor.so" dsh-mobile/app/src/main/jniLibs/arm64-v8a/
       - name: Basic source and runtime checks
@@ -124,6 +130,8 @@ jobs:
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs dist/DSH-Root-arm64-test.apk > dist/signature.txt
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging dist/DSH-Root-arm64-test.apk > dist/apk-info.txt
           cp dsh-mobile/app/src/main/assets/runtime/runtime-manifest.json dist/
+          cp "$RUNNER_TEMP/supervisor-elf.txt" dist/
+          cp dsh-mobile/IMPLEMENTATION.md dist/
           cp dsh-mobile/ROOT-TESTING.md dist/TESTING.md
           printf 'source=%s\nrun=%s\n' "$SOURCE_SHA" "$RUN_URL" > dist/build.txt
           cd dist && sha256sum DSH-Root-arm64-test.apk > SHA256SUMS
@@ -158,5 +166,6 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           tag="root-alpha-${RUN_NUMBER}"
+          (cd dist && sha256sum runtime-sources.tar.gz > runtime-sources-sha256.txt)
           gh release create "$tag" dist/* --target "$SOURCE_SHA" --prerelease \
             --title "DSH Root testing alpha ${RUN_NUMBER}" --notes-file dist/TESTING.md

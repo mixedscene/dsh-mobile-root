@@ -2,11 +2,14 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdirSync, cpSync, readFileSync } from 'node:fs'
+import { mkdirSync, cpSync, readFileSync, lstatSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
 
 const require = createRequire('/opt/dsh-mobile/install/package.json')
 assert.equal(process.version, 'v24.11.0')
+for (const command of ['dsh', 'pnpm', 'npm', 'npx']) assert.ok(lstatSync(`/usr/local/bin/${command}`).isFile(), `${command} must be a regular wrapper, not an executable symlink`)
+assert.match(execFileSync('/usr/local/bin/npm', ['--version'], { encoding: 'utf8' }), /^\d+\.\d+\.\d+\s*$/)
+assert.match(execFileSync('/usr/local/bin/npx', ['--version'], { encoding: 'utf8' }), /^\d+\.\d+\.\d+\s*$/)
 assert.match(execFileSync('/usr/local/bin/pnpm', ['--version'], { encoding: 'utf8' }), /^11\.28\.5\s*$/)
 const git = execFileSync('git', ['--version'], { encoding: 'utf8' }).match(/(\d+)\.(\d+)/)
 assert.ok(git && (Number(git[1]) > 2 || Number(git[1]) === 2 && Number(git[2]) >= 45))
@@ -27,6 +30,7 @@ mkdirSync(profile, { recursive: true })
 cpSync('/opt/dsh-mobile/profile-seed', profile, { recursive: true })
 const config = execFileSync('/usr/local/bin/dsh', ['--profile', 'mobile', '--dump-config'], { encoding: 'utf8', timeout: 60000, maxBuffer: 8 * 1024 * 1024 })
 assert.ok(config.includes('preset-mobile') && config.includes('mobile-activity'))
+assert.ok(config.includes('@deepseek-ai/dsh-web-search-deepseek') && config.includes('DSH_SEARCH_API_KEY'), 'mobile search provider and independent credential reference')
 for (const forbidden of ['dsh-office-to-pdf', 'dsh-schedule', 'dsh-tool-goal', 'dsh-workflow-ptc', 'dsh-mcp-resources']) assert.ok(!config.includes(forbidden), forbidden)
 const child = spawn('/opt/dsh-mobile/start-mobile.sh', ['3089'], { stdio: ['ignore', 'pipe', 'pipe'], detached: true })
 let diagnostics = ''
@@ -47,7 +51,7 @@ try {
   const evidence = JSON.parse(readFileSync('/tmp/dsh-mobile-activity.json', 'utf8'))
   assert.equal(evidence.coverageComplete, false)
   assert.equal(evidence.freezeEligible, false)
-  console.log('PASS node/git/pnpm/PTY/sharp/mobile-profile/keyless-boot; device and provider tests NOT RUN')
+  console.log(`PASS uid=${process.getuid()} node/npm/npx/git/pnpm/PTY/sharp/mobile-profile/keyless-boot; device and provider tests NOT RUN`)
 } catch (error) {
   // Boot output contains a one-time browser credential: never echo it to CI logs.
   throw new Error(`mobile smoke failed: ${error.message}; ${diagnostics.replace(/https?:\/\/[^\s]+/g, '[URL redacted]').replace(/token=[^\s]+/g, 'token=[redacted]')}`)

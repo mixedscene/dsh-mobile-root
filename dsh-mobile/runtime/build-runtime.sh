@@ -50,6 +50,7 @@ printf '93f82ed1cab772acf3167db3be2bd2e54876e0ab53c6a9af744940752b961d88  git.ta
 tar -xJf git.tar.xz
 cd git-2.45.4
 make -j2 prefix=/usr/local NO_TCLTK=YesPlease NO_GETTEXT=YesPlease all
+strip --strip-unneeded git
 make prefix=/usr/local NO_TCLTK=YesPlease NO_GETTEXT=YesPlease install
 cp COPYING /opt/dsh-mobile/licenses/Git-COPYING
 cp /tmp/git.tar.xz /opt/dsh-mobile/licenses/git-2.45.4-source.tar.xz
@@ -64,8 +65,20 @@ npm install --omit=dev --no-audit --no-fund --save-exact "/opt/dsh-mobile/$mobil
 node -e 'const p=require.resolve("@dsh-mobile/runtime-bundle/package.json"); const m=require(p); if(m.name!=="@dsh-mobile/runtime-bundle" || !m.dsh?.bundle?.patch)throw Error("Invalid installed mobile bundle"); console.log("Installed mobile bundle:",p)'
 npm list --all --json > /opt/dsh-mobile/licenses/npm-dependency-versions.json
 cp package-lock.json /opt/dsh-mobile/licenses/npm-package-lock.json
-ln -s /opt/dsh-mobile/install/node_modules/.bin/dsh /usr/local/bin/dsh
-ln -s /opt/dsh-mobile/install/node_modules/.bin/pnpm /usr/local/bin/pnpm
+# Flattened executable symlinks change Node's import.meta.url/require base.
+# Regular shell wrappers preserve each application's canonical JS entry path.
+write_launcher() {
+  destination=$1
+  entry=$2
+  test -f "$entry"
+  rm -f "$destination"
+  printf '#!/bin/sh\nexec /usr/local/bin/node %s "$@"\n' "$entry" > "$destination"
+  chmod 755 "$destination"
+}
+write_launcher /usr/local/bin/dsh /opt/dsh-mobile/install/node_modules/@deepseek-ai/dsh/lib/bin.js
+write_launcher /usr/local/bin/pnpm /opt/dsh-mobile/install/node_modules/pnpm/bin/pnpm.mjs
+write_launcher /usr/local/bin/npm /usr/local/lib/node_modules/npm/bin/npm-cli.js
+write_launcher /usr/local/bin/npx /usr/local/lib/node_modules/npm/bin/npx-cli.js
 mkdir -p /opt/dsh-mobile/profile-seed /home/dsh /tmp /proc /dev
 printf '{"name":"dsh-profile-mobile","private":true,"dependencies":{},"dsh":{"profile":{"bundles":["@dsh-mobile/runtime-bundle"]}}}\n' > /opt/dsh-mobile/profile-seed/package.json
 printf '[]\n' > /opt/dsh-mobile/profile-seed/cordis.patch.yml
@@ -93,7 +106,7 @@ while IFS= read -r package; do
 done < installed-source-versions.txt
 find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
 cp incomplete-source-downloads.txt /opt/dsh-mobile/licenses/incomplete-source-downloads.txt
-rm -rf /opt/dsh-mobile/build-input /opt/dsh-mobile/generate-mobile.mjs /root/.npm /tmp/* /var/lib/apt/lists/* /var/cache/apt/* /home/dsh/.dsh
+rm -rf /opt/dsh-mobile/build-input /opt/dsh-mobile/generate-mobile.mjs /root/.npm /tmp/* /var/lib/apt/lists/* /var/cache/apt/* /home/dsh/.dsh /home/dsh/.npm /home/dsh/.cache
 CHROOT
 for ((i=${#mounted[@]}-1; i>=0; i--)); do umount -R "${mounted[$i]}"; done
 mounted=()
@@ -108,4 +121,24 @@ sha256sum "$out/runtime-sources.tar.gz" > "$out/runtime-sources-sha256.txt"
 cp "$root/opt/dsh-mobile/licenses/incomplete-source-downloads.txt" "$out/incomplete-source-downloads.txt"
 rm -rf "$root/opt/dsh-mobile/corresponding-source"
 python3 "$source_dir/dsh-mobile/runtime/pack-runtime.py" "$root" "$out" "${GITHUB_SHA:-development}"
+# Verify the distributed representation, not the pre-pack symlink tree.
+verified=$(mktemp -d "${RUNNER_TEMP:-/tmp}/dsh-mobile-roundtrip.XXXXXX")
+chmod 755 "$verified"
+tar --extract --gzip --file "$out/runtime.tar.gz" --directory "$verified" --no-same-owner
+mkdir -p "$verified/home/dsh" "$verified/tmp" "$verified/proc" "$verified/sys" "$verified/dev"
+chown -R 65534:65534 "$verified/home/dsh" "$verified/tmp"
+chmod 700 "$verified/home/dsh"
+chmod 1777 "$verified/tmp"
+for target in dev proc sys; do
+  mount --rbind "/$target" "$verified/$target"
+  mount --make-rslave "$verified/$target"
+  mounted+=("$verified/$target")
+done
+chroot --userspec=65534:65534 --groups=3003 "$verified" /usr/bin/env -i \
+  HOME=/home/dsh DSH_HOME=/home/dsh/.dsh TMPDIR=/tmp PATH=/usr/local/bin:/usr/bin:/bin \
+  DSH_TELEMETRY_DISABLED=1 DSH_TOOLS_MODE=native \
+  /usr/local/bin/node /opt/dsh-mobile/smoke.mjs
+for ((i=${#mounted[@]}-1; i>=0; i--)); do umount -R "${mounted[$i]}"; done
+mounted=()
+printf 'PASS post-pack extraction as uid/gid 65534: node, npm, npx, pnpm, Git, PTY, sharp and formal mobile launcher boot. Android device/provider tests NOT RUN.\n' > "$out/runtime-validation.txt"
 echo "Runtime outputs: $out/runtime.tar.gz $out/runtime-manifest.json"

@@ -21,12 +21,14 @@ import java.util.concurrent.TimeUnit;
 public final class RootRuntime {
     private static final Map<String, Process> JOBS = new LinkedHashMap<>();
     private static final RuntimeAdmission ADMISSION = new RuntimeAdmission();
+    private static volatile String resolverStatus="DNS not prepared";
     private RootRuntime() {}
     public static File baseDir(Context c) { return new File(c.getFilesDir(), "mobile"); }
     public static File rootfsDir(Context c) { return new File(baseDir(c), "rootfs"); }
     public static File homeDir(Context c) { return new File(baseDir(c), "data/home"); }
     public static File tmpDir(Context c) { return new File(baseDir(c), "data/tmp"); }
     public static boolean installed(Context c) { return RuntimeInstaller.isInstalled(c); }
+    public static String resolverStatus() {return resolverStatus;}
 
     static String quote(String value) { return "'" + value.replace("'", "'\\''") + "'"; }
     static Process supervisor(Context c, List<String> args) throws IOException {
@@ -71,17 +73,20 @@ public final class RootRuntime {
         final LinkProperties properties;
         try {
             Network network=manager.getActiveNetwork();
-            if(network==null) throw new IOException("No active network; connect and restart runtime");
-            properties=manager.getLinkProperties(network);
+            properties=network==null?null:manager.getLinkProperties(network);
+            if(network!=null&&properties==null) throw new IOException("Cannot inspect active network DNS; retry explicitly");
         } catch(SecurityException error) {throw new IOException("Active-network DNS permission unavailable",error);}
-        if(properties==null) throw new IOException("Active network DNS is unavailable");
-        byte[] bytes=RuntimeDnsPolicy.resolver(properties.getDnsServers()).getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        List<java.net.InetAddress> addresses=properties==null?java.util.Collections.emptyList():properties.getDnsServers();
+        String configured=RuntimeDnsPolicy.resolver(addresses);
+        String status=addresses.isEmpty()?RuntimeDnsPolicy.OFFLINE_STATUS:"Active-network DNS configured; restart after network/DNS changes";
+        byte[] bytes=configured.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
         File temporary=File.createTempFile("resolver-",".tmp",baseDir(c));
         IOException failure=null;
         try {
             try(java.io.FileOutputStream out=new java.io.FileOutputStream(temporary)) {out.write(bytes);out.getFD().sync();}
             Os.chmod(temporary.getAbsolutePath(),0644);
             Os.rename(temporary.getAbsolutePath(),new File(baseDir(c),"resolv.conf").getAbsolutePath());
+            resolverStatus=status;
         } catch(android.system.ErrnoException error) {failure=new IOException("Cannot commit active-network resolver",error);throw failure;}
         catch(IOException error) {failure=error;throw error;}
         finally {
@@ -101,7 +106,8 @@ public final class RootRuntime {
         if(JOBS.isEmpty()) checked(c,Arrays.asList("check-state",new File(baseDir(c),"state").getAbsolutePath()),10);
         String id = UUID.randomUUID().toString();
         List<String> args = new ArrayList<>(Arrays.asList("run", rootfsDir(c).getAbsolutePath(),
-                new File(baseDir(c), "data").getAbsolutePath(), new File(baseDir(c), "state").getAbsolutePath(), id, "--"));
+                new File(baseDir(c), "data").getAbsolutePath(), new File(baseDir(c), "state").getAbsolutePath(), id,
+                String.valueOf(android.os.Process.myPid()), "--"));
         args.addAll(command);
         Process process = supervisor(c, args); JOBS.put(id, process);
         try {

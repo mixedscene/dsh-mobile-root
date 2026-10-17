@@ -2,6 +2,7 @@ package com.dshmobile.app;
 
 import android.content.Context;
 import android.system.Os;
+import android.system.OsConstants;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -20,7 +21,7 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.json.JSONObject;
 
-/** Installs the APK's hash-pinned, file/directory-only archive with an atomic commit. */
+/** Installs hash-pinned regular files/directories and confined backward hard links atomically. */
 public final class RuntimeInstaller {
     public interface Progress { void onProgress(String message); }
     private static final long MAX_EXPANDED = 4L * 1024 * 1024 * 1024;
@@ -96,7 +97,7 @@ public final class RuntimeInstaller {
         boolean committed=false;
         try {
             progress.onProgress("Extracting verified runtime (no scripts or network installs)");
-            Set<String> seen=new HashSet<>(); long total=0; int entries=0;
+            Set<String> seen=new HashSet<>(),seenRegular=new HashSet<>(); long total=0; int entries=0;
             String prefix=stage.getCanonicalPath()+File.separator;
             try(TarArchiveInputStream tar=new TarArchiveInputStream(new GZIPInputStream(c.getAssets().open("runtime/runtime.tar.gz")))) {
                 TarArchiveEntry entry;
@@ -105,12 +106,28 @@ public final class RuntimeInstaller {
                     if(++entries>MAX_ENTRIES) throw new IOException("Too many runtime entries");
                     String name=RuntimeArchivePolicy.name(entry.getName(),entry.isDirectory());
                     if(name.isEmpty()) continue;
-                    RuntimeArchivePolicy.entry(entry.isFile(),entry.isDirectory(),entry.isSymbolicLink()||entry.isLink(),
+                    boolean regular=entry.isFile()&&!entry.isLink()&&!entry.isSymbolicLink()
+                            &&!entry.isBlockDevice()&&!entry.isCharacterDevice()&&!entry.isFIFO();
+                    RuntimeArchivePolicy.entry(regular,entry.isDirectory(),entry.isLink(),entry.isSymbolicLink(),
                             entry.isSparse(),entry.getSize(),total,MAX_EXPANDED);
                     File target=new File(stage,name);
                     if(!target.getCanonicalPath().startsWith(prefix)) throw new IOException("Archive path escapes staging");
                     if(!seen.add(target.getCanonicalPath())) throw new IOException("Duplicate runtime entry");
+                    String relative=target.getCanonicalPath().substring(prefix.length());
+                    if(relative.equals(".runtime-verified.json")) throw new IOException("Archive uses a reserved installer path");
                     if(entry.isDirectory()) { mkdir(target); continue; }
+                    if(entry.isLink()) {
+                        String link=RuntimeArchivePolicy.hardLinkTarget(entry.getLinkName(),relative,seenRegular);
+                        File source=new File(stage,link);
+                        if(!source.getCanonicalPath().startsWith(prefix)) throw new IOException("Hard-link source escapes staging");
+                        mkdir(target.getParentFile());
+                        try {
+                            if(!OsConstants.S_ISREG(Os.lstat(source.getAbsolutePath()).st_mode)) throw new IOException("Hard-link source is not a regular file");
+                            Os.link(source.getAbsolutePath(),target.getAbsolutePath());
+                        } catch(android.system.ErrnoException error) {throw new IOException("Cannot create confined backward hard link",error);}
+                        // Link metadata must not chmod/chown the already extracted shared inode.
+                        continue;
+                    }
                     if(base.getUsableSpace()<entry.getSize()+64L*1024*1024) throw new IOException("Insufficient runtime storage");
                     mkdir(target.getParentFile());
                     if(!target.createNewFile()) throw new IOException("Duplicate runtime file");
@@ -122,6 +139,7 @@ public final class RuntimeInstaller {
                     }
                     try { Os.chmod(target.getAbsolutePath(),(entry.getMode()&0111)!=0?0755:0644); }
                     catch(android.system.ErrnoException error) { throw new IOException("Cannot set runtime mode",error); }
+                    seenRegular.add(relative);
                 }
             }
             for(String required:Arrays.asList("usr/local/bin/node","opt/dsh-mobile/start-mobile.sh","bin/bash","usr/local/bin/git","usr/bin/rg","etc/resolv.conf"))

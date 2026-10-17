@@ -1,6 +1,7 @@
 """Small host-independent archive boundary regressions; no Android emulation."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
@@ -44,6 +45,57 @@ class ArchiveTests(unittest.TestCase):
             self.assertEqual(packer.resolve_confined(root, "link"), root / "inside")
             with self.assertRaisesRegex(ValueError, "cycle"):
                 packer.resolve_confined(root, "cycle")
+
+    def test_hardlinks_only_point_back_to_regular_members(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            versions = root / "opt/dsh-mobile/tool-versions.json"
+            versions.parent.mkdir(parents=True)
+            versions.write_text('{}')
+            first = root / "a-file"
+            first.write_bytes(b"shared git binary")
+            os.link(first, root / "b-hardlink")
+            os.link(first, root / "c-hardlink")
+            output = Path(temporary) / "out"
+            packer.pack(root, output, "links")
+            regular = set()
+            links = []
+            with tarfile.open(output / "runtime.tar.gz") as archive:
+                for entry in archive:
+                    if entry.isfile():
+                        regular.add(entry.name)
+                    elif entry.islnk():
+                        self.assertIn(entry.linkname, regular)
+                        self.assertFalse(entry.linkname.startswith("/"))
+                        self.assertNotIn("..", entry.linkname.split("/"))
+                        self.assertEqual(entry.size, 0)
+                        links.append(entry)
+                    else:
+                        self.assertTrue(entry.isdir())
+            self.assertEqual(len(links), 2)
+            self.assertEqual([entry.linkname for entry in links], ["a-file", "a-file"])
+            manifest = json.loads((output / "runtime-manifest.json").read_text())
+            self.assertEqual(manifest["unpackedBytes"], len(b"shared git binary") + 2)
+            self.assertEqual(manifest["hardLinks"], 2)
+
+    def test_symbolic_file_alias_materializes_as_internal_hardlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            versions = root / "opt/dsh-mobile/tool-versions.json"
+            versions.parent.mkdir(parents=True)
+            versions.write_text('{}')
+            (root / "a-file").write_bytes(b"data")
+            try:
+                (root / "z-link").symlink_to("/a-file")
+            except OSError as error:
+                self.skipTest(f"host cannot create symlinks: {error}")
+            output = Path(temporary) / "out"
+            packer.pack(root, output, "symbolic-alias")
+            with tarfile.open(output / "runtime.tar.gz") as archive:
+                alias = archive.getmember("z-link")
+                self.assertTrue(alias.islnk())
+                self.assertEqual(alias.linkname, "a-file")
+                self.assertFalse(any(entry.issym() for entry in archive))
 
 
 if __name__ == "__main__":

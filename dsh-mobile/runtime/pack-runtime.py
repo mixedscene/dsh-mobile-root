@@ -1,4 +1,4 @@
-"""Materialize a confined rootfs into a links-free Android installer archive."""
+"""Materialize a confined rootfs with backward-only internal file hardlinks."""
 import hashlib
 import json
 import os
@@ -37,16 +37,18 @@ def resolve_confined(root, relative):
 
 
 def pack(root, output, build_id):
-    """Flatten links with ancestor-cycle checks and archive expansion limits."""
+    """Flatten symbolic links and deduplicate physical files into safe backward hardlinks."""
     root = root.resolve(strict=True)
     output.mkdir(parents=True, exist_ok=True)
     archive = output / "runtime.tar.gz"
     total = 0
     files = 0
     entries = 0
+    hardlinks = 0
+    archived_files = {}
     with tarfile.open(archive, "w:gz", format=tarfile.PAX_FORMAT, compresslevel=6) as tar:
         def visit(relative, ancestors):
-            nonlocal total, files, entries
+            nonlocal total, files, entries, hardlinks
             entries += 1
             if entries > 500_000:
                 raise ValueError("rootfs exceeds entry budget")
@@ -63,6 +65,15 @@ def pack(root, output, build_id):
                 for child in sorted(path.iterdir(), key=lambda entry: entry.name):
                     visit(f"{relative}/{child.name}", ancestors | {identity})
             elif stat.S_ISREG(metadata.st_mode):
+                first = archived_files.get(identity)
+                if first is not None:
+                    info = tarfile.TarInfo(relative)
+                    info.type = tarfile.LNKTYPE
+                    info.linkname = first
+                    info.mode = stat.S_IMODE(metadata.st_mode) & 0o777
+                    tar.addfile(info)
+                    hardlinks += 1
+                    return
                 total += metadata.st_size
                 files += 1
                 if total > 4 * 1024**3 or files > 500_000:
@@ -72,6 +83,8 @@ def pack(root, output, build_id):
                 info.mode = stat.S_IMODE(metadata.st_mode) & 0o777
                 with path.open("rb") as source:
                     tar.addfile(info, source)
+                # Only a completed regular member may become a later link target.
+                archived_files[identity] = relative
             else:
                 raise ValueError(f"unsupported special entry: {relative}")
 
@@ -86,7 +99,8 @@ def pack(root, output, build_id):
         "format": 1, "buildId": "mobile-root-" + build_id,
         "sha256": digest, "size": archive.stat().st_size,
         "unpackedBytes": total, "regularFiles": files,
-        "entries": entries,
+        "entries": entries, "hardLinks": hardlinks,
+        "archiveTypes": ["directory", "regular", "backward-internal-hardlink"],
         "architecture": "aarch64", "distribution": "Ubuntu noble",
         "tools": json.loads((root / "opt/dsh-mobile/tool-versions.json").read_text()),
         "profile": "mobile", "entrypoint": "/opt/dsh-mobile/start-mobile.sh",
