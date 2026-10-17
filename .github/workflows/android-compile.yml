@@ -1,0 +1,39 @@
+name: Android compile gate
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Compile ARM64 Android supervisor
+        run: |
+          cmake -S native/mobile-supervisor -B "$RUNNER_TEMP/supervisor" \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/27.2.12479018/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/supervisor" --parallel 2
+          mkdir -p dsh-mobile/app/src/main/jniLibs/arm64-v8a
+          cp "$RUNNER_TEMP/supervisor/libmobile_supervisor.so" dsh-mobile/app/src/main/jniLibs/arm64-v8a/
+      - name: Java unit and compilation gate (no runtime, not a user APK)
+        working-directory: dsh-mobile
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-unit-reports
+          path: dsh-mobile/app/build/reports/tests
+          retention-days: 7
