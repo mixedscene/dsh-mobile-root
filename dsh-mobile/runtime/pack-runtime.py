@@ -52,8 +52,11 @@ def pack(root, output, build_id):
             entries += 1
             if entries > 500_000:
                 raise ValueError("rootfs exceeds entry budget")
-            path = resolve_confined(root, relative)
-            metadata = path.stat()
+            try:
+                path = resolve_confined(root, relative)
+                metadata = path.stat()
+            except (OSError, ValueError) as error:
+                raise ValueError(f"cannot archive logical path {relative}: {error}") from error
             identity = (metadata.st_dev, metadata.st_ino)
             if stat.S_ISDIR(metadata.st_mode):
                 if identity in ancestors:
@@ -105,6 +108,7 @@ def pack(root, output, build_id):
         "tools": json.loads((root / "opt/dsh-mobile/tool-versions.json").read_text()),
         "profile": "mobile", "entrypoint": "/opt/dsh-mobile/start-mobile.sh",
         "licenseInventory": "/opt/dsh-mobile/licenses/SOURCES.txt",
+        "documentationCleanup": "/opt/dsh-mobile/licenses/dangling-optional-docs.json",
         "limits": ["device root and SELinux unverified", "activity coverage incomplete; automatic freeze forbidden", "published CLI includes unused transitive packages"],
     }
     (output / "runtime-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

@@ -30,6 +30,7 @@ cp "$source_dir/packages/bundle/base/cordis.patch.yml" "$root/opt/dsh-mobile/bui
 cp "$source_dir/packages/bundle/web-app/cordis.patch.yml" "$root/opt/dsh-mobile/build-input/packages/bundle/web-app/"
 cp "$source_dir/packages/bundle/web-app/presets/standard.patch.yml" "$root/opt/dsh-mobile/build-input/packages/bundle/web-app/presets/"
 cp "$source_dir/dsh-mobile/runtime/"{generate-mobile.mjs,activity.mjs,start-mobile.sh,smoke.mjs} "$root/opt/dsh-mobile/"
+cp "$source_dir/dsh-mobile/runtime/"{runtime-docs.py,pack-runtime.py} "$root/opt/dsh-mobile/"
 chroot "$root" /bin/bash -euxo pipefail <<'CHROOT'
 apt-get update
 apt-get install -y --no-install-recommends bash coreutils findutils grep sed gawk tar gzip xz-utils curl ca-certificates ripgrep git less libstdc++6 libatomic1 libcurl4t64 libexpat1 zlib1g
@@ -86,6 +87,7 @@ printf 'autoInstallPeers: false\n' > /opt/dsh-mobile/profile-seed/pnpm-workspace
 chmod 755 /opt/dsh-mobile/start-mobile.sh
 HOME=/home/dsh DSH_HOME=/home/dsh/.dsh node /opt/dsh-mobile/smoke.mjs
 # Package metadata and notices remain; no compiler is required on the phone.
+PYTHONDONTWRITEBYTECODE=1 python3 /opt/dsh-mobile/runtime-docs.py preserve /
 apt-get purge -y build-essential gcc g++ cpp make dpkg-dev python3 pkg-config libssl-dev libcurl4-openssl-dev libexpat1-dev zlib1g-dev gettext
 apt-get autoremove -y --purge
 apt-get clean
@@ -106,8 +108,11 @@ while IFS= read -r package; do
 done < installed-source-versions.txt
 find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
 cp incomplete-source-downloads.txt /opt/dsh-mobile/licenses/incomplete-source-downloads.txt
-rm -rf /opt/dsh-mobile/build-input /opt/dsh-mobile/generate-mobile.mjs /root/.npm /tmp/* /var/lib/apt/lists/* /var/cache/apt/* /home/dsh/.dsh /home/dsh/.npm /home/dsh/.cache
+rm -rf /opt/dsh-mobile/build-input /opt/dsh-mobile/generate-mobile.mjs /opt/dsh-mobile/runtime-docs.py /opt/dsh-mobile/pack-runtime.py /root/.npm /tmp/* /var/lib/apt/lists/* /var/cache/apt/* /home/dsh/.dsh /home/dsh/.npm /home/dsh/.cache
 CHROOT
+PYTHONDONTWRITEBYTECODE=1 python3 "$source_dir/dsh-mobile/runtime/runtime-docs.py" cleanup "$root"
+cp "$root/opt/dsh-mobile/licenses/dangling-optional-docs.json" "$out/runtime-doc-cleanup.json"
+cp "$root/opt/dsh-mobile/licenses/dangling-optional-docs.json" "$out/runtime-doc-cleanup.txt"
 for ((i=${#mounted[@]}-1; i>=0; i--)); do umount -R "${mounted[$i]}"; done
 mounted=()
 # Device nodes are created only by the native supervisor's bind mounts.
